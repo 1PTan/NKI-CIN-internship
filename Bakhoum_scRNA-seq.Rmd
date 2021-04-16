@@ -1,0 +1,298 @@
+---
+title: "Bakhoum et al 2018 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE, warning=FALSE, message = FALSE
+  # dpi = 300, fig.width = 10, fig.height = 6
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+#BiocManager::install("DropletUtils")
+library(DropletUtils)
+# BiocManager::install("DESeq2")
+# BiocManager::install("apeglm")
+# library(DESeq2)
+
+# install.packages("tidyverse")
+library(tidyverse)
+# install.packages("Seurat")
+library(Seurat)
+# install.packages("patchwork")
+library(patchwork)
+```
+
+```{r load_data, include=FALSE}
+?read10xCounts  # help for more information
+
+samples <- c("data/CINdata/kif2b", "data/CINdata/MCAK", "data/CINdata/MCAK-Hypir")
+scRNAdata <- read10xCounts(samples, sample.names = c("kif2b", "MCAK", "dnMCAK"))
+#dropkif2b <- read10xCounts("data/CINdata/kif2b", sample.names = c("kif2b"))
+
+assay(scRNAdata)
+
+
+library(sparseMatrixStats)
+scRNAdata_f <- scRNAdata[, colSums(assay(scRNAdata)) > 5000] 
+assay(scRNAdata_f)
+
+
+barcodes <- read.table("data/CINdata/kif2b/barcodes.tsv")
+genes <- read.table("data/CINdata/kif2b/genes.tsv")
+matrix <- read.table("data/CINdata/kif2b/matrix.mtx", sep = "\ ", header = TRUE, fill = TRUE)
+
+# generate output dir path named data
+source.output.dir <- file.path("data")
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+} else{
+  print("Data folder already exists")
+}
+```
+
+```{r}
+# Loading sparse matrix in R - Cell ranger page
+library(Matrix)
+matrix_dir = "data/CINdata/kif2b/"
+barcode.path <- paste0(matrix_dir, "barcodes.tsv")
+features.path <- paste0(matrix_dir, "genes.tsv")
+matrix.path <- paste0(matrix_dir, "matrix.mtx")
+
+mat <- readMM(file = matrix.path)
+feature.names = read.delim(features.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+barcode.names = read.delim(barcode.path,
+                           header = FALSE,
+                           stringsAsFactors = FALSE)
+colnames(mat) = barcode.names$V1
+rownames(mat) = feature.names$V1
+
+mat
+
+```
+
+```{r}
+# Load data Seurat
+if (FALSE) {
+# For output from CellRanger < 3.0
+data_dir <- 'path/to/data/directory'
+list.files(data_dir) # Should show barcodes.tsv, genes.tsv, and matrix.mtx
+expression_matrix <- Read10X(data.dir = data_dir)
+seurat_object = CreateSeuratObject(counts = expression_matrix)
+
+# For output from CellRanger >= 3.0 with multiple data types
+data_dir <- 'path/to/data/directory'
+list.files(data_dir) # Should show barcodes.tsv.gz, features.tsv.gz, and matrix.mtx.gz
+data <- Read10X(data.dir = data_dir)
+seurat_object = CreateSeuratObject(counts = data$`Gene Expression`)
+seurat_object[['Protein']] = CreateAssayObject(counts = data$`Antibody Capture`)
+}
+
+
+data_dir <- 'data/CINdata/kif2b/'
+list.files(data_dir) # Should show barcodes.tsv, genes.tsv, and matrix.mtx
+kif2b_expression_matrix <- Read10X(data.dir = data_dir)
+kif2b = CreateSeuratObject(counts = kif2b_expression_matrix, project = "kif2b")
+
+data_dir <- 'data/CINdata/MCAK/'
+MCAK_expression_matrix <- Read10X(data.dir = data_dir)
+MCAK = CreateSeuratObject(counts = MCAK_expression_matrix, project = "MCAK")
+
+data_dir <- 'data/CINdata/MCAK-Hypir/'
+dnMCAK_expression_matrix <- Read10X(data.dir = data_dir)
+dnMCAK = CreateSeuratObject(counts = dnMCAK_expression_matrix, project = "dnMCAK")
+
+rm(kif2b_expression_matrix)
+rm(MCAK_expression_matrix)
+rm(dnMCAK_expression_matrix)
+```
+
+```{r}
+# Load ensembl gene database
+ensembl_db <- read.csv("EnsDb.Hsapiens.v86.csv")
+
+# Check whether mitochondrial genes are present in the samples
+mitochondrial_genes <- ensembl_db %>% filter(str_detect(symbol, "^MT-"))
+
+mitochondrial_genes$symbol %in% rownames(kif2b)
+mitochondrial_genes$symbol %in% rownames(MCAK)
+mitochondrial_genes$symbol %in% rownames(dnMCAK)
+
+# Compute the % of mitochondrial counts
+kif2b[["percent.mt"]] <- PercentageFeatureSet(kif2b, pattern = "^MT-") %>% mutate_all(~replace(., is.na(.), 0))
+MCAK[["percent.mt"]] <- PercentageFeatureSet(MCAK, pattern = "^MT-") %>% mutate_all(~replace(., is.na(.), 0))
+dnMCAK[["percent.mt"]] <- PercentageFeatureSet(dnMCAK, pattern = "^MT-") %>% mutate_all(~replace(., is.na(.), 0))
+
+```
+
+```{r}
+# QC plots based on number of counts, features and % of mitochondrial genes
+
+VlnPlot(kif2b, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(MCAK, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(dnMCAK, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+FeatureScatter(kif2b, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+FeatureScatter(kif2b, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+FeatureScatter(MCAK, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+FeatureScatter(MCAK, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+FeatureScatter(dnMCAK, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+FeatureScatter(dnMCAK, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+```
+
+```{r}
+# Filter dataset based on # of features, counts and mitocondrial %
+kif2b_f <- subset(kif2b, subset = nFeature_RNA > 200 & percent.mt < 5 & nCount_RNA > 5000)
+MCAK_f <- subset(MCAK, subset = nFeature_RNA > 200 & percent.mt < 5 & nCount_RNA > 5000)
+dnMCAK_f <- subset(dnMCAK, subset = nFeature_RNA > 200 & percent.mt < 5 & nCount_RNA > 5000)
+
+kif2b_f
+MCAK_f
+dnMCAK_f
+```
+
+```{r}
+# QC plots after filtering
+
+VlnPlot(kif2b_f, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(MCAK_f, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(dnMCAK_f, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+FeatureScatter(kif2b_f, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+FeatureScatter(kif2b_f, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+FeatureScatter(MCAK_f, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+FeatureScatter(MCAK_f, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+FeatureScatter(dnMCAK_f, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+FeatureScatter(dnMCAK_f, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+```
+
+```{r}
+# QC plots after filtering
+
+VlnPlot(kif2b_f, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(MCAK_f, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(dnMCAK_f, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+FeatureScatter(kif2b_f, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+FeatureScatter(kif2b_f, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+FeatureScatter(MCAK_f, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+FeatureScatter(MCAK_f, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+FeatureScatter(dnMCAK_f, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+FeatureScatter(dnMCAK_f, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+```
+
+```{r}
+# Combine datasets
+scRNA_c <- merge(kif2b_f, y = c(MCAK_f, dnMCAK_f), add.cell.ids = c("kif2b", "MCAK", "dnMCAK"), project = "BakhoumCIN2018")
+
+scRNA_c
+# colnames(scRNA_c) %>% head()
+# colnames(scRNA_c) %>% tail()
+
+```
+
+```{r}
+# Normalize dataset
+scRNA_cn <- NormalizeData(scRNA_c, normalization.method = "LogNormalize", scale.factor = 10000)
+
+# find highly variable features with a variance stabilizing transform
+scRNA_cn <- FindVariableFeatures(scRNA_cn, selection.method = "vst", nfeatures = 2000)
+
+VariableFeaturePlot(scRNA_cn) %>% LabelPoints(points = head(VariableFeatures(scRNA_cn), 10), repel = TRUE)
+
+```
+```{r}
+# Scale dataset
+scRNA_cn <- ScaleData(scRNA_cn, features = rownames(scRNA_cn))
+
+# Perform PCA
+scRNA_cn <- RunPCA(scRNA_cn, features = VariableFeatures(object = scRNA_cn))
+
+```
+
+```{r}
+# Plot PCA results
+VizDimLoadings(scRNA_cn, dims = 1:2, reduction = "pca")
+DimPlot(scRNA_cn, reduction = "pca")
+
+DimHeatmap(scRNA_cn, dims = 1:10, cells = 500, balanced = TRUE)
+ElbowPlot(scRNA_cn)
+
+```
+
+```{r}
+# Dimensionality reduction with UMAP
+scRNA_cn <- RunUMAP(scRNA_cn, dims = 1:10)
+
+DimPlot(scRNA_cn, reduction = "umap")
+
+```
+
+```{r}
+# Clustering cells
+scRNA_cn <- FindNeighbors(scRNA_cn, dims = 1:10)
+scRNA_cn <- FindClusters(scRNA_cn, resolution = 0.5)
+
+scRNA_cn <- StashIdent(scRNA_cn, save.name = "clusterID")
+
+#head(Idents(scRNA_cn), 5)
+```
+
+```{r}
+DimPlot(scRNA_cn, reduction = "umap")
+
+```
+
+```{r}
+cluster.markers <- FindAllMarkers(scRNA_cn, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+cluster.markers
+
+top10 <- cluster.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+# cluster.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+
+```
+
+```{r}
+VlnPlot(scRNA_cn, features = c("SAA1", "KRT81"))
+
+FeaturePlot(scRNA_cn, features = c("SAA1", "KRT81"))
+
+
+DoHeatmap(scRNA_cn, features = top10$gene) + NoLegend()
+
+```
+
+```{r}
+saveRDS(scRNA_cn, file = "data/Bakhoum_scRNA.rds")
+
+# scRNA_cn <- readRDS(file = "data/Bakhoum_scRNA.rds")
+
+Seurat::SetIdent(scRNA_cn, value = "clusterID") %>% DimPlot(reduction = "umap")
+# orig.ident
+```
+
+```{r}
+Seurat::SetIdent(scRNA_cn, value = "clusterID") %>% DimPlot(reduction = "umap")
+Seurat::SetIdent(scRNA_cn, value = "orig.ident") %>% DimPlot(reduction = "umap")
+
+```
