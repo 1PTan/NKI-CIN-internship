@@ -10,78 +10,29 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(
-  echo = FALSE, warning=FALSE, message = FALSE
-  # dpi = 300, fig.width = 10, fig.height = 6
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300
+  # fig.width = 10, fig.height = 6, output: html_notebook
 )
 
 # install.packages("BiocManager") #(only if you do not have BiocManager)
 #BiocManager::install("DropletUtils")
-library(DropletUtils)
-# BiocManager::install("DESeq2")
-# BiocManager::install("apeglm")
-# library(DESeq2)
-
+# library(DropletUtils)
 # install.packages("tidyverse")
 library(tidyverse)
 # install.packages("Seurat")
 library(Seurat)
 # install.packages("patchwork")
 library(patchwork)
-```
-
-```{r load_data, include=FALSE}
-?read10xCounts  # help for more information
-
-samples <- c("data/CINdata/kif2b", "data/CINdata/MCAK", "data/CINdata/MCAK-Hypir")
-scRNAdata <- read10xCounts(samples, sample.names = c("kif2b", "MCAK", "dnMCAK"))
-#dropkif2b <- read10xCounts("data/CINdata/kif2b", sample.names = c("kif2b"))
-
-assay(scRNAdata)
-
-
+# install.packages("ggrepel")
+library(ggrepel)
+# install.packages("sparseMatrixStats")
 library(sparseMatrixStats)
-scRNAdata_f <- scRNAdata[, colSums(assay(scRNAdata)) > 5000] 
-assay(scRNAdata_f)
-
-
-barcodes <- read.table("data/CINdata/kif2b/barcodes.tsv")
-genes <- read.table("data/CINdata/kif2b/genes.tsv")
-matrix <- read.table("data/CINdata/kif2b/matrix.mtx", sep = "\ ", header = TRUE, fill = TRUE)
-
-# generate output dir path named data
-source.output.dir <- file.path("data")
-
-# if source output dir does not exist, create it
-if (!dir.exists(source.output.dir)) {
-    dir.create(source.output.dir)
-} else{
-  print("Data folder already exists")
-}
 ```
 
+# Loading data
 ```{r}
-# Loading sparse matrix in R - Cell ranger page
-library(Matrix)
-matrix_dir = "data/CINdata/kif2b/"
-barcode.path <- paste0(matrix_dir, "barcodes.tsv")
-features.path <- paste0(matrix_dir, "genes.tsv")
-matrix.path <- paste0(matrix_dir, "matrix.mtx")
+export = TRUE
 
-mat <- readMM(file = matrix.path)
-feature.names = read.delim(features.path,
-                           header = FALSE,
-                           stringsAsFactors = FALSE)
-barcode.names = read.delim(barcode.path,
-                           header = FALSE,
-                           stringsAsFactors = FALSE)
-colnames(mat) = barcode.names$V1
-rownames(mat) = feature.names$V1
-
-mat
-
-```
-
-```{r}
 # Load data Seurat
 if (FALSE) {
 # For output from CellRanger < 3.0
@@ -112,11 +63,26 @@ data_dir <- 'data/CINdata/MCAK-Hypir/'
 dnMCAK_expression_matrix <- Read10X(data.dir = data_dir)
 dnMCAK = CreateSeuratObject(counts = dnMCAK_expression_matrix, project = "dnMCAK")
 
+
+# generate output dir path named data
+source.output.dir <- file.path("data")
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+} else{
+  print("Data folder already exists")
+}
+
+# Remove objects to free memory and clean up workspace 
 rm(kif2b_expression_matrix)
 rm(MCAK_expression_matrix)
 rm(dnMCAK_expression_matrix)
+rm(data_dir)
+rm(source.output.dir)
 ```
 
+# Inspecting dataset, QC plots
 ```{r}
 # Load ensembl gene database
 ensembl_db <- read.csv("EnsDb.Hsapiens.v86.csv")
@@ -128,11 +94,13 @@ mitochondrial_genes$symbol %in% rownames(kif2b)
 mitochondrial_genes$symbol %in% rownames(MCAK)
 mitochondrial_genes$symbol %in% rownames(dnMCAK)
 
+```
+
+```{r}
 # Compute the % of mitochondrial counts
 kif2b[["percent.mt"]] <- PercentageFeatureSet(kif2b, pattern = "^MT-") %>% mutate_all(~replace(., is.na(.), 0))
 MCAK[["percent.mt"]] <- PercentageFeatureSet(MCAK, pattern = "^MT-") %>% mutate_all(~replace(., is.na(.), 0))
 dnMCAK[["percent.mt"]] <- PercentageFeatureSet(dnMCAK, pattern = "^MT-") %>% mutate_all(~replace(., is.na(.), 0))
-
 ```
 
 ```{r}
@@ -153,6 +121,7 @@ FeatureScatter(dnMCAK, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
 
 ```
 
+# Filter datasets
 ```{r}
 # Filter dataset based on # of features, counts and mitocondrial %
 kif2b_f <- subset(kif2b, subset = nFeature_RNA > 200 & percent.mt < 5 & nCount_RNA > 5000)
@@ -166,7 +135,6 @@ dnMCAK_f
 
 ```{r}
 # QC plots after filtering
-
 VlnPlot(kif2b_f, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
 VlnPlot(MCAK_f, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
 VlnPlot(dnMCAK_f, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
@@ -183,23 +151,15 @@ FeatureScatter(dnMCAK_f, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
 ```
 
 ```{r}
-# QC plots after filtering
-
-VlnPlot(kif2b_f, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
-VlnPlot(MCAK_f, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
-VlnPlot(dnMCAK_f, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
-
-FeatureScatter(kif2b_f, feature1 = "nCount_RNA", feature2 = "percent.mt") +
-FeatureScatter(kif2b_f, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
-
-FeatureScatter(MCAK_f, feature1 = "nCount_RNA", feature2 = "percent.mt") +
-FeatureScatter(MCAK_f, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
-
-FeatureScatter(dnMCAK_f, feature1 = "nCount_RNA", feature2 = "percent.mt") +
-FeatureScatter(dnMCAK_f, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
-
+# Remove objects to free memory and clean up workspace 
+rm(kif2b)
+rm(MCAK)
+rm(dnMCAK)
+rm(mitochondrial_genes)
+rm(ensembl_db)
 ```
 
+# Combine and analyse datasets
 ```{r}
 # Combine datasets
 scRNA_c <- merge(kif2b_f, y = c(MCAK_f, dnMCAK_f), add.cell.ids = c("kif2b", "MCAK", "dnMCAK"), project = "BakhoumCIN2018")
@@ -211,88 +171,372 @@ scRNA_c
 ```
 
 ```{r}
+median_library_size <- scRNA_c@assays$RNA %>% colSums() %>% median()
+
 # Normalize dataset
-scRNA_cn <- NormalizeData(scRNA_c, normalization.method = "LogNormalize", scale.factor = 10000)
+scRNA_cn <- NormalizeData(scRNA_c, normalization.method = "LogNormalize", scale.factor = median_library_size)
 
 # find highly variable features with a variance stabilizing transform
 scRNA_cn <- FindVariableFeatures(scRNA_cn, selection.method = "vst", nfeatures = 2000)
 
 VariableFeaturePlot(scRNA_cn) %>% LabelPoints(points = head(VariableFeatures(scRNA_cn), 10), repel = TRUE)
 
-```
-```{r}
 # Scale dataset
 scRNA_cn <- ScaleData(scRNA_cn, features = rownames(scRNA_cn))
 
 # Perform PCA
 scRNA_cn <- RunPCA(scRNA_cn, features = VariableFeatures(object = scRNA_cn))
 
+# Add CIN status meta data
+scRNA_cn@meta.data <- scRNA_cn@meta.data %>% mutate(CIN_status = ifelse(orig.ident %in% c("dnMCAK"),"CIN-high","CIN-low"))
+
 ```
 
 ```{r}
 # Plot PCA results
+Idents(scRNA_cn) <- "orig.ident"
 VizDimLoadings(scRNA_cn, dims = 1:2, reduction = "pca")
 DimPlot(scRNA_cn, reduction = "pca")
+ElbowPlot(scRNA_cn)
 
 DimHeatmap(scRNA_cn, dims = 1:10, cells = 500, balanced = TRUE)
-ElbowPlot(scRNA_cn)
+DimHeatmap(scRNA_cn, dims = 11:20, cells = 500, balanced = TRUE)
 
 ```
 
 ```{r}
-# Dimensionality reduction with UMAP
-scRNA_cn <- RunUMAP(scRNA_cn, dims = 1:10)
+# Dimensionality reduction with UMAP and tSNE
+scRNA_cn <- RunUMAP(scRNA_cn, dims = 1:20)
 
-DimPlot(scRNA_cn, reduction = "umap")
+scRNA_cn <- RunTSNE(scRNA_cn, dims.use = 1:20, reduction.use = "pca", perplexity = 30)
 
+?RunUMAP
 ```
 
 ```{r}
 # Clustering cells
-scRNA_cn <- FindNeighbors(scRNA_cn, dims = 1:10)
+scRNA_cn <- FindNeighbors(scRNA_cn, dims = 1:20)
 scRNA_cn <- FindClusters(scRNA_cn, resolution = 0.5)
 
 scRNA_cn <- StashIdent(scRNA_cn, save.name = "clusterID")
 
+# Inspect cluster information
 #head(Idents(scRNA_cn), 5)
+Idents(scRNA_cn) <- "clusterID"
+
+table(scRNA_cn$orig.ident)
+table(Idents(scRNA_cn))
+prop.table(table(scRNA_cn$clusterID))
+prop.table(table(scRNA_cn$clusterID, scRNA_cn$orig.ident), margin = 2)
+prop.table(table(scRNA_cn$orig.ident, scRNA_cn$clusterID), margin = 2)
+
+prop.table(table(scRNA_cn$CIN_status))
+prop.table(table(scRNA_cn$clusterID, scRNA_cn$CIN_status), margin = 2)
+prop.table(table(scRNA_cn$CIN_status, scRNA_cn$clusterID), margin = 2)
+
+table(scRNA_cn$clusterID, scRNA_cn$CIN_status) %>% as.data.frame() %>% rename("clusterID" = Var1, "group" = Var2) %>% ggplot(aes(x = clusterID, y = group, fill = Freq)) + geom_tile() + scale_fill_distiller(palette = "PuBu") + geom_text(aes(label=Freq)) + labs(y = "", fill = "Number of cells") 
+
 ```
 
 ```{r}
-DimPlot(scRNA_cn, reduction = "umap")
+DimPlot(scRNA_cn, reduction = "umap", group.by = "orig.ident")
+DimPlot(scRNA_cn, reduction = "umap", group.by = "clusterID")
+DimPlot(scRNA_cn, reduction = "umap", group.by = "CIN_status")
+
+
+DimPlot(scRNA_cn, reduction = "tsne", group.by = "orig.ident")
+DimPlot(scRNA_cn, reduction = "tsne", group.by = "clusterID")
+DimPlot(scRNA_cn, reduction = "tsne", group.by = "CIN_status")
 
 ```
 
 ```{r}
+# Find cluster markers 
+Idents(scRNA_cn) <- "clusterID"
 cluster.markers <- FindAllMarkers(scRNA_cn, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
 
-cluster.markers
+#cluster.markers
 
 top10 <- cluster.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
-# cluster.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
 
+cluster.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+
+cluster.markers %>% filter(cluster == 3)
 ```
 
 ```{r}
+Idents(scRNA_cn) <- "clusterID"
+
+# Plotting examples from a couple of top n clusters
 VlnPlot(scRNA_cn, features = c("SAA1", "KRT81"))
 
 FeaturePlot(scRNA_cn, features = c("SAA1", "KRT81"))
 
-
 DoHeatmap(scRNA_cn, features = top10$gene) + NoLegend()
 
+# Plotting EMT signature 
+VlnPlot(scRNA_cn, features = EMT_signature)
+FeaturePlot(scRNA_cn, features = EMT_signature)
+
+Idents(scRNA_cn) <- "CIN_status"
+VlnPlot(scRNA_cn, features = EMT_signature)
+FeaturePlot(scRNA_cn, features = EMT_signature)
+
+```
+
+
+```{r}
+CIN_signature <- c('PELI2','BMP2','SHH','TNS4','RAB3B','ROBO1','ARHGAP28','CHN2','CST1','F13A1','CPVL','SEMA6D','NHSL2','GTF2IP7','DPYSL3','PCDH7','KHDRBS3','TRAC','TMEM156',
+'CST4','CD24','FGF5','NTN4')
+
+CIN_present <- CIN_signature %in% rownames(scRNA_cn@assays$RNA)
+
+VlnPlot(scRNA_cn, features = CIN_signature[CIN_present][1:6])
+FeaturePlot(scRNA_cn, features = CIN_signature[CIN_present][1:6])
+
+VlnPlot(scRNA_cn, features = CIN_signature[CIN_present][7:12])
+FeaturePlot(scRNA_cn, features = CIN_signature[CIN_present][7:12])
+
+VlnPlot(scRNA_cn, features = CIN_signature[CIN_present][13:18])
+FeaturePlot(scRNA_cn, features = CIN_signature[CIN_present][13:18])
+
+VlnPlot(scRNA_cn, features = CIN_signature[CIN_present][19:21])
+FeaturePlot(scRNA_cn, features = CIN_signature[CIN_present][19:21])
+
+VlnPlot(scRNA_cn, features = CIN_signature[CIN_present][15])
+FeaturePlot(scRNA_cn, features = CIN_signature[CIN_present][15])
+```
+
+
+
+```{r}
+# Plot gene expression of CIN high x low cells
+
+Idents(scRNA_cn) <- "CIN_status"
+
+CIN_high <- subset(scRNA_cn, idents = "CIN-high")
+avg.CINhigh.cells <- as.data.frame(log1p(AverageExpression(CIN_high, verbose = FALSE)$RNA)) %>% rename("CIN_high" = all) %>% rownames_to_column("gene")
+# avg.CINhigh.cells$gene <- row.names(avg.CINhigh.cells)
+
+CIN_low <- subset(scRNA_cn, idents = "CIN-low")
+avg.CINlow.cells <- as.data.frame(log1p(AverageExpression(CIN_low, verbose = FALSE)$RNA)) %>% rename("CIN_low" = all) %>% rownames_to_column("gene")
+# avg.CINlow.cells$gene <- row.names(avg.CINlow.cells)
+
+avg.CINhigh.cells %>% full_join(avg.CINlow.cells, by = "gene") %>% ggplot(aes(x = CIN_low, y = CIN_high)) + geom_point()
 ```
 
 ```{r}
+# Find CIN-high markers based on DE 
+Idents(scRNA_cn) <- "CIN_status"
+
+# obs Try using min.pct lower, 
+?FindMarkers 
+CIN.cluster.markers <- FindMarkers(scRNA_cn, ident.1 = "CIN-high", only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25) %>% rownames_to_column("gene")
+
+CIN.top <- CIN.cluster.markers %>% top_n(n = 25, wt = avg_log2FC)
+
+CIN.cluster.markers %>% top_n(n = 25, wt = avg_log2FC)
+
+DoHeatmap(scRNA_cn, features = CIN.top$gene)
+```
+
+
+```{r}
+# Compare with Bakhoum CIN gene signature
+CIN_signature_df <- c('PELI2','BMP2','SHH','TNS4','RAB3B','ROBO1','ARHGAP28','CHN2','CST1','F13A1','CPVL','SEMA6D','NHSL2','GTF2IP7','DPYSL3','PCDH7','KHDRBS3','TRAC','TMEM156',
+'CST4','CD24','FGF5','NTN4') %>% as.data.frame() %>% rename('gene' = ".") %>% mutate(Bakhoum_gene_sig = TRUE)
+
+CIN.cluster.markers %>% left_join(CIN_signature_df) %>% filter(Bakhoum_gene_sig)
+#CIN.cluster.markers %>% filter(str_detect(gene, "BMP2"))
+```
+
+
+```{r}
+```
+
+```{r}
+# Plot gene expression of CIN high x low cells, labeling DE genes
+DE_comp <- avg.CINhigh.cells %>% full_join(avg.CINlow.cells, by = "gene") %>% left_join(
+  CIN.cluster.markers %>% mutate(CIN_DE = TRUE, label = p_val_adj < 1e-260)  %>% select(gene, CIN_DE, label)
+)
+
+DE_comp %>% ggplot(aes(x = CIN_low, y = CIN_high, col = CIN_DE)) + geom_point() +
+  geom_text_repel(
+  aes(x = CIN_low, y = CIN_high, label = gene), data = DE_comp %>% filter(label), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+  ) + theme(legend.position = "none")
+```
+
+
+```{r}
+if(export){
 saveRDS(scRNA_cn, file = "data/Bakhoum_scRNA.rds")
+  
+cluster.markers %>% write.csv2("data/Bakhoum_scRNA_cluster_markers.csv", row.names = FALSE)
+
+CIN.cluster.markers %>% write.csv2("data/Bakhoum_scRNA_CIN_cluster_markers.csv", row.names = FALSE)
+
+}
+
 
 # scRNA_cn <- readRDS(file = "data/Bakhoum_scRNA.rds")
+# cluster.markers <- read.csv2("data/Bakhoum_scRNA_cluster_markers.csv")
+# CIN.cluster.markers <- read.csv2("data/Bakhoum_scRNA_CIN_cluster_markers.csv")
 
-Seurat::SetIdent(scRNA_cn, value = "clusterID") %>% DimPlot(reduction = "umap")
-# orig.ident
+
+rm(scRNA_c)
+
+knitr::knit_exit()
 ```
 
 ```{r}
-Seurat::SetIdent(scRNA_cn, value = "clusterID") %>% DimPlot(reduction = "umap")
-Seurat::SetIdent(scRNA_cn, value = "orig.ident") %>% DimPlot(reduction = "umap")
+# Enrichr results
+enrichr_diff <- read.table("data/Enrichr results/scRNA CIN_high DE/MSigDB_Hallmark_2020_table_CIN_high_cluster.txt", sep = "\t", header = TRUE)
 
 ```
+
+
+```{r}
+# To compare batch effects, normalize and scale each dataset individually, then merge
+
+# Kif2b
+median_library_size <- kif2b_f@assays$RNA %>% colSums() %>% median()
+# Normalize dataset
+kif2b_fn <- NormalizeData(kif2b_f, normalization.method = "LogNormalize", scale.factor = median_library_size)
+# find highly variable features with a variance stabilizing transform
+kif2b_fn <- FindVariableFeatures(kif2b_fn, selection.method = "vst", nfeatures = 2000)
+
+VariableFeaturePlot(kif2b_fn) %>% LabelPoints(points = head(VariableFeatures(kif2b_fn), 10), repel = TRUE)
+
+# Scale dataset
+kif2b_fn <- ScaleData(kif2b_fn, features = rownames(kif2b_fn))
+
+# MCAK
+median_library_size <- MCAK_f@assays$RNA %>% colSums() %>% median()
+# Normalize dataset
+MCAK_fn <- NormalizeData(MCAK_f, normalization.method = "LogNormalize", scale.factor = median_library_size)
+# find highly variable features with a variance stabilizing transform
+MCAK_fn <- FindVariableFeatures(MCAK_fn, selection.method = "vst", nfeatures = 2000)
+# Scale dataset
+MCAK_fn <- ScaleData(MCAK_fn, features = rownames(MCAK_fn))
+
+
+# dnMCAK
+median_library_size <- dnMCAK_f@assays$RNA %>% colSums() %>% median()
+# Normalize dataset
+dnMCAK_fn <- NormalizeData(dnMCAK_f, normalization.method = "LogNormalize", scale.factor = median_library_size)
+# find highly variable features with a variance stabilizing transform
+dnMCAK_fn <- FindVariableFeatures(dnMCAK_fn, selection.method = "vst", nfeatures = 2000)
+# Scale dataset
+dnMCAK_fn <- ScaleData(dnMCAK_fn, features = rownames(dnMCAK_fn))
+
+
+# Merge datasets, keeping the normalization and scaling on the data
+scRNA_norm_c <- merge(kif2b_fn, y = c(MCAK_fn, dnMCAK_fn), add.cell.ids = c("kif2b", "MCAK", "dnMCAK"), project = "BakhoumCIN2018", merge.data = TRUE)
+
+# Normalize, find variable features and scale the merged dataset
+scRNA_norm_cn <- NormalizeData(scRNA_norm_c, normalization.method = "LogNormalize")
+scRNA_norm_cn <- FindVariableFeatures(scRNA_norm_cn, selection.method = "vst", nfeatures = 2000)
+scRNA_norm_cn <- ScaleData(scRNA_norm_cn, features = rownames(scRNA_norm_cn))
+
+rm(scRNA_norm_c)
+rm(kif2b_f)
+rm(MCAK_f)
+rm(dnMCAK_f)
+
+```
+
+```{r}
+# Perform PCA
+scRNA_norm_cn <- RunPCA(scRNA_norm_cn, features = VariableFeatures(object = scRNA_norm_cn))
+
+# Plot PCA results
+DimPlot(scRNA_norm_cn, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(scRNA_norm_cn)
+
+# Cluster the cells using the first twenty principal components.
+
+scRNA_norm_cn <- FindNeighbors(scRNA_norm_cn, dims = 1:20)
+scRNA_norm_cn <- FindClusters(scRNA_norm_cn, resolution = 0.5)
+
+scRNA_norm_cn <- StashIdent(scRNA_norm_cn, save.name = "clusterID")
+
+scRNA_norm_cn <- RunUMAP(scRNA_norm_cn, dims = 1:20)
+scRNA_norm_cn <- RunTSNE(scRNA_norm_cn, dims.use = 1:20, reduction.use = "pca", perplexity = 30)
+
+```
+
+```{r}
+# Inspect dataset, looking for batch effects
+VlnPlot(scRNA_norm_cn, features = c("nFeature_RNA", "nCount_RNA"), group.by = "orig.ident", ncol=2)
+
+# Plot PCA results
+DimPlot(scRNA_norm_cn, reduction = "pca", group.by = "orig.ident")
+
+DimPlot(scRNA_norm_cn, reduction = "umap", group.by = "clusterID")
+DimPlot(scRNA_norm_cn, reduction = "umap", group.by = "orig.ident")
+DimPlot(scRNA_norm_cn, reduction = "tsne", group.by = "clusterID")
+DimPlot(scRNA_norm_cn, reduction = "tsne", group.by = "orig.ident")
+
+```
+
+```{r}
+# Export Seurat object with processed individual datasets prior to merging, re-normalizing and scaling again
+
+if(export){
+saveRDS(scRNA_norm_cn, file = "data/Bakhoum_scRNA_norm_cn.rds")
+  }
+#scRNA_cn <- readRDS(file = "data/Bakhoum_scRNA_norm_cn.rds")
+
+
+```
+
+```{r}
+# Explore batch correction with Seurat integration workflow
+ob.list <- list(kif2b_fn, MCAK_fn, dnMCAK_fn)
+
+ob.list <- lapply(list(kif2b_f, MCAK_f, dnMCAK_f), FUN = function(x){
+  x <- NormalizeData(x)
+  x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+}
+)
+
+features <- SelectIntegrationFeatures(object.list = ob.list)
+
+CINanchors <- FindIntegrationAnchors(object.list = ob.list, anchor.features = features)
+
+IntegratedCIN <- IntegrateData(anchorset = CINanchors)
+
+
+```
+
+```{r}
+# specify that we will perform downstream analysis on the corrected data note that the original
+# unmodified data still resides in the 'RNA' assay
+DefaultAssay(IntegratedCIN) <- "integrated"
+
+# Run the standard workflow for visualization and clustering
+IntegratedCIN <- ScaleData(IntegratedCIN, verbose = FALSE)
+IntegratedCIN <- RunPCA(IntegratedCIN, npcs = 30, verbose = FALSE)
+IntegratedCIN <- RunUMAP(IntegratedCIN, reduction = "pca", dims = 1:30)
+IntegratedCIN <- RunTSNE(IntegratedCIN, reduction = "pca", dims = 1:30)
+IntegratedCIN <- FindNeighbors(IntegratedCIN, reduction = "pca", dims = 1:30)
+IntegratedCIN <- FindClusters(IntegratedCIN, resolution = 0.5)
+
+DimPlot(IntegratedCIN, reduction = "umap", group.by = "orig.ident")
+DimPlot(IntegratedCIN, reduction = "umap", split.by = "orig.ident")
+
+DimPlot(IntegratedCIN, reduction = "umap", label = TRUE, repel = TRUE)
+
+DimPlot(IntegratedCIN, reduction = "tsne", group.by = "orig.ident")
+DimPlot(IntegratedCIN, reduction = "tsne", label = TRUE, repel = TRUE)
+
+```
+
+```{r}
+DimPlot(IntegratedCIN, reduction = "umap", label = TRUE, repel = TRUE, split.by = "orig.ident")
+
+```
+
+
+
+
