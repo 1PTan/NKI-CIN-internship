@@ -59,6 +59,7 @@ ensembl_db <- read.csv("EnsDb.Hsapiens.v86.csv")
 # Load transcriptomics count data
 # Each row is a gene, each column a sample
 df.counts.raw <- read.csv("data/GSE98183_Counts.geneSymbols.75bpPE.csv") 
+# df.counts.raw2 <- read.csv("data/GSE98183_Counts.geneSymbols.101bpSE.csv") 
 
 # load sample design
 design <- read.csv2("data/samples.csv")
@@ -503,7 +504,7 @@ df.deseq.results_map <- df.deseq.results %>% left_join(gene_ensembl_db %>% selec
 df.deseq.results_map <- df.deseq.results_map %>% mutate(neglog10padj = ifelse(padj != 0, -log10(padj), NA))
 
 # Export data
-df.deseq.results_map %>% write_csv2("data/transcriptomics_deseq.csv")
+df.deseq.results_map %>% write_csv2("data/bulk_transcriptomics_deseq.csv")
 
 # DE genes using symmetrical threshold
 df.deseq.results_map %>% filter(within_threshold == TRUE) %>% write_csv2(paste0("data/CIN-diff_deseq_DE_", alpha, "_FC", log2FCthresh, ".csv"))
@@ -556,6 +557,8 @@ df.deseq.results_map %>% arrange(-log2FoldChange) %>% mutate(gene_symbol = ifels
 
 ```
 
+
+# GSEA
 ```{r}
 # GSEA results
 GSEA_pos <- read.table("data/CIN_high_low_preranked_log2FC.GseaPreranked/gsea_report_for_na_pos_1618265603872.tsv", header = TRUE, sep = "\t")
@@ -566,20 +569,17 @@ GSEA_res <- rbind(GSEA_pos, GSEA_neg) %>% mutate(within_threshold = FDR.q.val < 
 
 GSEA_res %>% select(-c(X, within_threshold)) %>% arrange(-NES) %>%  write_csv2("data/GSEA_CIN_DE_hallmarks.csv")
 
+# Hallmark names
+msigdb_hallmarks_names <- read.csv2("data/names_hallmarks.csv")
 
-# GSEA_res <- GSEA_res %>% mutate(cropped_name = sub("HALLMARK_", "", NAME)
-GSEA_res_names <- GSEA_res %>% filter(within_threshold) 
-GSEA_res_names$cropped_name = c("Kras signaling", "Angiogenesis", "Androgen response", "Inflammatory response", "EMT", "Wnt/B-catenin", "OxPhos", "Myc targets v1", "ROS", "Apical Surface", "Myc targets v2")  
-
-GSEA_res <- GSEA_res %>% left_join(GSEA_res_names)
-
+GSEA_res <- GSEA_res %>% left_join(msigdb_hallmarks_names %>% rename(NAME = pathway))
 		
 GSEA_res %>% 
   ggplot(aes(x = log10(FDR.q.val), y = NES)) +
   geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
   geom_hline(yintercept = 0, col = "black") +
   geom_text_repel(
-  aes(x = log10(FDR.q.val), y = NES, label = cropped_name), data = GSEA_res %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+  aes(x = log10(FDR.q.val), y = NES, label = name), data = GSEA_res %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
   ) +
   labs(x = "log10(FDRq)", y = "Normalized Enrichment Score", col = "Enriched in") + 
   scale_y_continuous(limits = c(-2,2), breaks = seq(-2,2,1)) + 
@@ -587,6 +587,23 @@ GSEA_res %>%
 
 # png(filename="data/GSEA_results.png", width=600, height=600)
 # ggsave(file="data/GSEA_results.png", width=6, height=4, dpi=300)
+
+```
+# Compare with Bulk GSEA NES
+```{r}
+Bulk_gsea <- read.csv2("data/Supp_table6.csv")
+
+# GSEA x Bulk
+GSEA_comp <- Bulk_gsea %>% select(NAME, NES, FDR.q.val) %>% rename(orig_NES = NES, orig_FDR.q.val = FDR.q.val) %>% left_join(
+  GSEA_res %>% select(NAME, NES, FDR.q.val)) %>% left_join(
+  msigdb_hallmarks_names %>% rename(NAME = pathway)
+  ) %>% mutate(sign_agreement = sign(orig_NES) == sign(NES))
+
+GSEA_comp %>% ggplot(aes(x = orig_NES, y = NES, col = FDR.q.val)) + 
+  geom_point() + geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = orig_NES, y = NES, label = name), data = GSEA_comp %>% filter(!sign_agreement), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + labs(x = "Orig GSEA NES", y = "GSEA NES")
 
 ```
 
@@ -600,20 +617,14 @@ GSEA_res <- rbind(GSEA_pos, GSEA_neg) %>% mutate(within_threshold = FDR.q.val < 
 
 GSEA_res %>% select(-c(X, within_threshold)) %>% arrange(-NES) %>%  write_csv2("data/GSEA_CIN_DE_hallmarks.csv")
 
+GSEA_res <- GSEA_res %>% left_join(msigdb_hallmarks_names %>% rename(NAME = pathway))
 
-# GSEA_res <- GSEA_res %>% mutate(cropped_name = sub("HALLMARK_", "", NAME)
-GSEA_res_names <- GSEA_res %>% filter(within_threshold) 
-GSEA_res_names$cropped_name = c("Kras signaling", "Angiogenesis", "Androgen response", "Inflammatory response", "Wnt/B-catenin", "EMT", "OxPhos", "ROS", "Myc targets v2", "Apical Surface")  
-
-GSEA_res <- GSEA_res %>% left_join(GSEA_res_names)
-
-		
 GSEA_res %>% 
   ggplot(aes(x = log10(FDR.q.val), y = NES)) +
   geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
   geom_hline(yintercept = 0, col = "black") +
   geom_text_repel(
-  aes(x = log10(FDR.q.val), y = NES, label = cropped_name), data = GSEA_res %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+  aes(x = log10(FDR.q.val), y = NES, label = name), data = GSEA_res %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
   ) +
   labs(x = "log10(FDRq)", y = "Normalized Enrichment Score", col = "Enriched in") + 
   scale_y_continuous(limits = c(-2,2), breaks = seq(-2,2,1)) + 
@@ -621,9 +632,25 @@ GSEA_res %>%
 
 #png(filename="data/GSEA_symbol_results.png", width=600, height=600)
 #ggsave(file="data/GSEA_symbol_results.png", width=6, height=4, dpi=300)
+
+
+# GSEA x Bulk
+GSEA_comp <- Bulk_gsea %>% select(NAME, NES, FDR.q.val) %>% rename(orig_NES = NES, orig_FDR.q.val = FDR.q.val) %>% left_join(
+  GSEA_res %>% select(NAME, NES, FDR.q.val)) %>% left_join(
+  msigdb_hallmarks_names %>% rename(NAME = pathway)
+  ) %>% mutate(sign_agreement = sign(orig_NES) == sign(NES))
+
+GSEA_comp %>% ggplot(aes(x = orig_NES, y = NES, col = FDR.q.val)) + 
+  geom_point() + geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = orig_NES, y = NES, label = name), data = GSEA_comp %>% filter(!sign_agreement), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + labs(x = "Orig GSEA NES", y = "GSEA NES")
+
+# png(filename="data/GSEA_symbol_x_orig.png", width=600, height=600)
+# ggsave(file="data/GSEA_symbol_x_orig.png", width=6, height=4, dpi=300)
 ```
 
-
+# Enrichr
 ```{r}
 # Enrichr results
 enrichr_diff <- read.table("data/Enrichr results/alpha0.001_FC2_diff/MSigDB_Hallmark_2020_table_ENRICHR.txt", sep = "\t", header = TRUE)
