@@ -1,0 +1,280 @@
+---
+title: "Bakhoum et al 2018 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+#BiocManager::install("DropletUtils")
+# library(DropletUtils)
+# install.packages("Seurat")
+library(Seurat)
+# install.packages("patchwork")
+library(patchwork)
+# install.packages("ggrepel")
+library(ggrepel)
+# install.packages("sparseMatrixStats")
+library(sparseMatrixStats)
+#install.packages("msigdbr")
+library(msigdbr)
+# BiocManager::install("GO.db")
+library(GO.db)
+# BiocManager::install("GOstats")
+library(GOstats)
+# BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+# install.packages("tidyverse")
+library(tidyverse)
+# install.packages("proxy")
+library(proxy)
+# BiocManager::install("fgsea")
+library(fgsea)
+# install.packages('plotly')
+library(plotly)
+# install.packages('pheatmap')
+library(pheatmap)
+# install.packages("gplots")
+library(gplots)
+
+select = dplyr::select
+rename = dplyr::rename
+```
+
+# Loading data
+```{r}
+# Load filtered and combined data
+# scRNA_c <- readRDS(file = "data/scRNA_c.rds")
+
+export = FALSE
+
+# generate output dir path named data
+source.output.dir <- file.path("output_sc")
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+} else{
+  print("Output folder already exists")
+}
+
+```
+
+```{r}
+# Load object from Seurat instead of handling objects and computations in this script
+scRNA_cn <- readRDS(file = paste0(source.output.dir, "/Bakhoum_scRNA.rds"))
+
+cluster.DE <- read.csv2(paste0(source.output.dir, "/Bakhoum_scRNA_cluster_markers.csv"))
+CIN.DE <- read.csv2(paste0(source.output.dir, "/Bakhoum_scRNA_CIN_cluster_markers.csv"))
+
+```
+
+## CIN DE
+```{r}
+# Plot gene expression of CIN high x low cells
+Idents(scRNA_cn) <- "CIN_status"
+
+# Subset data
+CIN_high <- subset(scRNA_cn, idents = "CIN-high")
+CIN_low <- subset(scRNA_cn, idents = "CIN-low")
+
+# Calculate average gene expression for CIN high and low cells
+avg.CINhigh.cells <- as.data.frame(AverageExpression(CIN_high, verbose = FALSE)$RNA) %>% rename("CIN_high" = all) %>% rownames_to_column("gene")
+
+avg.CINlow.cells <- as.data.frame(AverageExpression(CIN_low, verbose = FALSE)$RNA) %>% rename("CIN_low" = all) %>% rownames_to_column("gene")
+
+
+# Plot CIN high x cin low pseudocounts in log space
+avg.CINhigh.cells %>% full_join(avg.CINlow.cells, by = "gene") %>% ggplot(aes(x = CIN_low, y = CIN_high)) + geom_point() + scale_y_continuous(trans = "log1p") + scale_x_continuous(trans = "log1p")
+
+# avg.CINhigh.cells %>% full_join(avg.CINlow.cells, by = "gene") %>% mutate(fc = (CIN_high + 1)/(CIN_low + 1), log2fc = log2(fc)) %>% filter(gene %in% c("LAPTM5", "MARCKSL1", "HLA-B"))
+
+```
+
+```{r}
+# Plot gene expression of CIN high x low cells, labeling DE genes
+DE_comp <- avg.CINhigh.cells %>% full_join(avg.CINlow.cells, by = "gene") %>% left_join(
+  CIN.DE %>% mutate(CIN_DE = TRUE, label = p_val_adj < 1e-260)  %>% select(gene, CIN_DE, label)
+)
+
+DE_comp %>% ggplot(aes(x = CIN_low, y = CIN_high, col = CIN_DE)) + geom_point() +
+  geom_text_repel(
+  aes(x = CIN_low, y = CIN_high, label = gene), data = DE_comp %>% filter(label), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+  ) + theme(legend.position = "none") + scale_y_continuous(trans = "log1p") + scale_x_continuous(trans = "log1p")
+
+```
+
+## Compare with Bulk CIN DE - gene correlation
+```{r}
+CIN.DE.bulk <- read_csv2("data/bulk_transcriptomics_deseq.csv")
+
+CIN.DE.c <- CIN.DE.bulk %>% inner_join(CIN.DE %>% rename("symbol" = gene)) %>% mutate(bulk_sign = sign(log2FoldChange), sc_sign = sign(avg_log2FC))
+
+CIN.DE.c %>% ggplot(aes(x = log2FoldChange, y = avg_log2FC)) + geom_point(alpha = 0.3, col = "blue") + geom_abline(slope = 1, col = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low Log2FC", x = "Bulk transcriptomics", y = "scRNA-seq transcriptomics") + geom_text_repel(
+  aes(x = log2FoldChange, y = avg_log2FC, label = symbol), data = CIN.DE.c %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  )
+
+cor(CIN.DE.c$log2FoldChange, CIN.DE.c$avg_log2FC)
+
+# Check agreement between the sign of genes
+table(sign(CIN.DE.c$log2FoldChange), sign(CIN.DE.c$avg_log2FC))
+prop.table(table(sign(CIN.DE.c$log2FoldChange), sign(CIN.DE.c$avg_log2FC)))
+
+
+CIN.DE.c %>% ggplot(aes(x = -log(pvalue) * bulk_sign, y = -log(p_val) * sc_sign)) + geom_point(alpha = 0.3, col = "blue") + geom_abline(slope = 1, col = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low signed -log(p-value)", x = "Bulk transcriptomics", y = "scRNA-seq transcriptomics") + geom_text_repel(
+  aes(x = -log(pvalue) * bulk_sign, y =  -log(p_val) * sc_sign, label = symbol), data = CIN.DE.c %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  )
+
+```
+```{r}
+# Investigate count numbers for outlying genes
+CIN.DE.c %>% filter(gene %in% c("CSAG1","SOX4", "FOXA2","CPVL","CST1","CST4","RASD1","CST7", "LINC01088","ENSG00000227706"))
+
+df.counts.raw <- read.csv("data/GSE98183_Counts.geneSymbols.75bpPE.csv") 
+colnames(df.counts.raw) <- c("gene", "MK", "MKH", "Kb", "Ka", "cont")
+
+df.counts.raw %>% filter(gene %in% c("CSAG1","SOX4", "FOXA2","CPVL","CST1","CST4","RASD1","CST7", "LINC01088","ENSG00000227706"))
+
+```
+
+## Compare with Bulk stat, instead of shrunk LFC - gene correlation
+```{r}
+CIN.DE.bulk_noLFC <- read_csv2("data/bulk_transcriptomics_deseq_noLFC.csv")
+
+CIN.DE.c_noLFC <- CIN.DE.bulk_noLFC %>% inner_join(CIN.DE %>% rename("symbol" = gene)) %>% mutate(bulk_sign = sign(log2FoldChange), sc_sign = sign(avg_log2FC))
+
+CIN.DE.c_noLFC %>% ggplot(aes(x = stat, y = avg_log2FC)) + geom_point(alpha = 0.3, col = "blue") + geom_abline(slope = 1, col = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low", x = "Bulk transcriptomics stat", y = "scRNA-seq transcriptomics log2fc") + geom_text_repel(
+  aes(x = log2FoldChange, y = avg_log2FC, label = symbol), data = CIN.DE.c_noLFC %>% filter(pvalue < 0.01), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  )
+
+cor(CIN.DE.c_noLFC$stat, CIN.DE.c_noLFC$avg_log2FC)
+```
+
+```{r}
+mat <- Seurat::GetAssayData(scRNA_cn, assay = "RNA")
+sc_means <- mat %>% rowMeans() %>% as.data.frame() %>% rename("sc_mean" = ".") %>% rownames_to_column("symbol")
+
+CIN.DE.c <- CIN.DE.c %>% mutate(sc_bulk_ratio = avg_log2FC/log2FoldChange, bulk_sc_ratio = log2FoldChange/avg_log2FC) %>% left_join(sc_means)
+
+CIN.DE.c %>% select(sc_bulk_ratio, bulk_sc_ratio, baseMean, sc_mean) %>% summary()
+
+CIN.DE.c %>% ggplot(aes(sc_bulk_ratio)) + geom_histogram(col = "blue", bins = 1000) + labs(title = "CIN-High x CIN-Low", x = "scRNA-seq/Bulk Log2FC transcriptomics", y = "Count")
+
+CIN.DE.c %>% ggplot(aes(sc_bulk_ratio)) + geom_histogram(col = "blue", bins = 100) + labs(title = "CIN-High x CIN-Low", x = "scRNA-seq/Bulk Log2FC transcriptomics", y = "Count") + xlim(-10, 10)
+
+```
+
+
+```{r}
+CIN.DE.c %>% ggplot(aes(x = sc_bulk_ratio, y = baseMean, col = log(pvalue))) + geom_point()  + geom_text_repel(
+  aes(x = sc_bulk_ratio, y = baseMean, label = symbol), data = CIN.DE.c %>% filter(abs(sc_bulk_ratio) > 10), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + scale_color_gradient2(low="blue", mid = "black", high="red", midpoint = -2)
+
+CIN.DE.c %>% ggplot(aes(x = sc_bulk_ratio, y = baseMean, col = log(pvalue))) + geom_point()  + geom_text_repel(
+  aes(x = sc_bulk_ratio, y = baseMean, label = symbol), data = CIN.DE.c %>% filter(abs(sc_bulk_ratio) > 10), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + xlim(-100, 100) + scale_color_gradient2(low="blue", mid = "black", high="red", midpoint = -2)
+
+CIN.DE.c %>% ggplot(aes(x = bulk_sc_ratio, y = baseMean, col = log(pvalue))) + geom_point()  + geom_text_repel(
+  aes(x = bulk_sc_ratio, y = baseMean, label = symbol), data = CIN.DE.c %>% filter(abs(sc_bulk_ratio) > 10), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + scale_color_gradient2(low="blue", mid = "black", high="red", midpoint = -2)
+
+
+CIN.DE.c %>% filter(within_threshold) %>% ggplot(aes(x = sc_bulk_ratio, y = baseMean, col = sc_mean)) + geom_point()  + geom_text_repel(
+  aes(x = sc_bulk_ratio, y = baseMean, label = symbol), data = CIN.DE.c %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  )
+
+CIN.DE.c %>% ggplot(aes(x = sc_mean, y = baseMean, col = log(pvalue))) + geom_point()  + geom_text_repel(
+  aes(x = sc_mean, y = baseMean, label = symbol), data = CIN.DE.c %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  )
+
+CIN.DE.c %>% filter(pvalue < 0.01) %>% ggplot(aes(x = sc_mean, y = baseMean, col = log(pvalue))) + geom_point()  + geom_text_repel(
+  aes(x = sc_mean, y = baseMean, label = symbol), data = CIN.DE.c %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  )
+```
+
+## Load msigdb hallmarks gene set
+```{r}
+all_gene_sets <- msigdbr("Homo sapiens")
+
+msigdb_hallmarks_set <- filter(all_gene_sets, gs_cat == "H") %>% select(gs_name, gene_symbol)
+
+msigdb_hallmarks_set <- split(msigdb_hallmarks_set$gene_symbol, msigdb_hallmarks_set$gs_name)
+
+msigdb_hallmarks_names <- read.csv2("data/names_hallmarks.csv")
+
+rm(all_gene_sets)
+# Another option is loading files with gene sets
+# msigdb_hallmarks <- gmtPathways("data/h.all.v7.4.symbols.gmt")
+# msigdb_hallmarks %>% head() %>% lapply(head)
+
+```
+
+## Inspect msigdb hallmark gene sets and overlaps
+```{r}
+# Set up empty data frame
+hallmark_gene_df <- setNames(data.frame(matrix(ncol = 2, nrow = 0)), c("gene", "pathway"))
+
+# Populate data frame with genes from each pathway
+for(i in 1:length(msigdb_hallmarks_set)){
+  hallmark_pathway = names(msigdb_hallmarks_set)[[i]]
+  print(paste(i, hallmark_pathway))
+  
+  hallmark_gene_df <- rbind(hallmark_gene_df, msigdb_hallmarks_set[[i]] %>% as.data.frame() %>% rename("gene" = ".") %>% mutate(pathway = hallmark_pathway))
+}
+
+# Make the dataframe wide with pathways as columns
+hallmark_gene_df_wide <- hallmark_gene_df %>% mutate(value = TRUE) %>% pivot_wider(values_from = value, names_from = pathway) %>% mutate_all(~replace(., is.na(.), FALSE))
+
+# vars.to.replace = colnames(hallmark_gene_df_wide)
+# Replace NA values with FALSE
+# hallmark_gene_df_wide[vars.to.replace][is.na(hallmark_gene_df_wide[vars.to.replace])] <- FALSE
+
+# number of genes in each pathway / pathways in each gene
+hallmark_gene_df_wide %>% column_to_rownames("gene") %>% colSums()
+# hallmark_gene_df_wide %>% column_to_rownames("gene") %>% rowSums()
+```
+
+```{r}
+# Inspect particular hallmark pathways
+hallmark_gene_df_wide %>% select(gene, HALLMARK_INFLAMMATORY_RESPONSE, HALLMARK_INTERFERON_ALPHA_RESPONSE, HALLMARK_INTERFERON_GAMMA_RESPONSE, HALLMARK_TGF_BETA_SIGNALING) %>% filter(HALLMARK_INFLAMMATORY_RESPONSE)
+
+# Calculate and inspect the Jaccard distance between pathways
+hallmark_jaccard_distances <- hallmark_gene_df_wide %>% column_to_rownames("gene") %>% proxy::dist(method = "Jaccard", by_rows = FALSE)
+
+hallmark_jaccard_distances <- hallmark_jaccard_distances %>% as.matrix() %>% as.data.frame()
+
+hallmark_jaccard_distances %>% summary()
+
+hallmark_jaccard_distances %>% select(HALLMARK_INFLAMMATORY_RESPONSE, HALLMARK_INTERFERON_ALPHA_RESPONSE, HALLMARK_INTERFERON_GAMMA_RESPONSE, HALLMARK_TGF_BETA_SIGNALING) %>% view()
+
+```
+
+```{r}
+# Get genes shared between specific hallmarks
+sum(hallmark_gene_df_wide$HALLMARK_INFLAMMATORY_RESPONSE * hallmark_gene_df_wide$HALLMARK_INTERFERON_ALPHA_RESPONSE)
+
+INFR_EMT <- hallmark_gene_df_wide %>% column_to_rownames("gene") %>% filter(HALLMARK_INFLAMMATORY_RESPONSE * HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION == 1) %>% rownames()
+INFR_EMT
+
+INFR_IFNa <- hallmark_gene_df_wide %>% column_to_rownames("gene") %>% filter(HALLMARK_INFLAMMATORY_RESPONSE * HALLMARK_INTERFERON_ALPHA_RESPONSE == 1) %>% rownames()
+INFR_IFNa
+
+INFR_IFNy <- hallmark_gene_df_wide %>% column_to_rownames("gene") %>% filter(HALLMARK_INFLAMMATORY_RESPONSE * HALLMARK_INTERFERON_GAMMA_RESPONSE == 1) %>% rownames()
+INFR_IFNy
+
+INFR_TGFB <- hallmark_gene_df_wide %>% column_to_rownames("gene") %>% filter(HALLMARK_INFLAMMATORY_RESPONSE * HALLMARK_TGF_BETA_SIGNALING == 1) %>% rownames()
+INFR_TGFB
+
+IFNa_IFNy <- hallmark_gene_df_wide %>% column_to_rownames("gene") %>% filter(HALLMARK_INTERFERON_ALPHA_RESPONSE * HALLMARK_INTERFERON_GAMMA_RESPONSE == 1) %>% rownames()
+IFNa_IFNy
+```
+

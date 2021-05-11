@@ -1,0 +1,176 @@
+---
+title: "Bakhoum et al 2018 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = FALSE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+#BiocManager::install("DropletUtils")
+# library(DropletUtils)
+# install.packages("Seurat")
+library(Seurat)
+# install.packages("sparseMatrixStats")
+library(sparseMatrixStats)
+# install.packages("tidyverse")
+library(tidyverse)
+```
+
+# Loading data
+```{r}
+# Load data from 10x into Seurat
+if (FALSE) {
+# For output from CellRanger < 3.0
+data_dir <- 'path/to/data/directory'
+list.files(data_dir) # Should show barcodes.tsv, genes.tsv, and matrix.mtx
+expression_matrix <- Read10X(data.dir = data_dir)
+seurat_object = CreateSeuratObject(counts = expression_matrix)
+
+# For output from CellRanger >= 3.0 with multiple data types
+data_dir <- 'path/to/data/directory'
+list.files(data_dir) # Should show barcodes.tsv.gz, features.tsv.gz, and matrix.mtx.gz
+data <- Read10X(data.dir = data_dir)
+seurat_object = CreateSeuratObject(counts = data$`Gene Expression`)
+seurat_object[['Protein']] = CreateAssayObject(counts = data$`Antibody Capture`)
+}
+
+
+data_dir <- 'data/CINdata/kif2b/'
+list.files(data_dir) # Should show barcodes.tsv, genes.tsv, and matrix.mtx
+kif2b_expression_matrix <- Read10X(data.dir = data_dir)
+kif2b = CreateSeuratObject(counts = kif2b_expression_matrix, project = "kif2b")
+
+data_dir <- 'data/CINdata/MCAK/'
+MCAK_expression_matrix <- Read10X(data.dir = data_dir)
+MCAK = CreateSeuratObject(counts = MCAK_expression_matrix, project = "MCAK")
+
+data_dir <- 'data/CINdata/MCAK-Hypir/'
+dnMCAK_expression_matrix <- Read10X(data.dir = data_dir)
+dnMCAK = CreateSeuratObject(counts = dnMCAK_expression_matrix, project = "dnMCAK")
+
+
+export = FALSE
+
+# generate output dir path named data
+source.output.dir <- file.path("data")
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+} else{
+  print("Output folder already exists")
+}
+
+# Remove objects to free memory and clean up workspace 
+rm(kif2b_expression_matrix)
+rm(MCAK_expression_matrix)
+rm(dnMCAK_expression_matrix)
+rm(data_dir)
+rm(source.output.dir)
+```
+
+# Inspecting dataset, QC plots
+```{r}
+# Load ensembl gene database
+ensembl_db <- read.csv("EnsDb.Hsapiens.v86.csv")
+
+# Check whether mitochondrial genes are present in the samples
+mitochondrial_genes <- ensembl_db %>% filter(str_detect(symbol, "^MT-"))
+
+mitochondrial_genes$symbol %in% rownames(kif2b) %>% sum()
+mitochondrial_genes$symbol %in% rownames(MCAK) %>% sum() 
+mitochondrial_genes$symbol %in% rownames(dnMCAK) %>% sum()
+
+```
+
+```{r}
+# Compute the % of mitochondrial counts
+kif2b[["percent.mt"]] <- PercentageFeatureSet(kif2b, pattern = "^MT-") %>% mutate_all(~replace(., is.na(.), 0))
+MCAK[["percent.mt"]] <- PercentageFeatureSet(MCAK, pattern = "^MT-") %>% mutate_all(~replace(., is.na(.), 0))
+dnMCAK[["percent.mt"]] <- PercentageFeatureSet(dnMCAK, pattern = "^MT-") %>% mutate_all(~replace(., is.na(.), 0))
+```
+
+```{r}
+# QC plots based on number of counts, features and % of mitochondrial genes
+
+VlnPlot(kif2b, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(MCAK, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(dnMCAK, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+FeatureScatter(kif2b, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+FeatureScatter(kif2b, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+FeatureScatter(MCAK, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+FeatureScatter(MCAK, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+FeatureScatter(dnMCAK, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+FeatureScatter(dnMCAK, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+```
+
+# Filter datasets
+```{r}
+# Filter dataset based on # of features, counts and mitocondrial %
+kif2b_f <- subset(kif2b, subset = nFeature_RNA > 200 & percent.mt < 15 & nCount_RNA > 5000)
+MCAK_f <- subset(MCAK, subset = nFeature_RNA > 200 & percent.mt < 15 & nCount_RNA > 5000)
+dnMCAK_f <- subset(dnMCAK, subset = nFeature_RNA > 200 & percent.mt < 15 & nCount_RNA > 5000)
+
+kif2b_f
+MCAK_f
+dnMCAK_f
+
+nrow(kif2b_f@meta.data) + nrow(MCAK_f@meta.data) + nrow(dnMCAK_f@meta.data)
+```
+
+```{r}
+# QC plots after filtering
+VlnPlot(kif2b_f, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(MCAK_f, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(dnMCAK_f, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+FeatureScatter(kif2b_f, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+FeatureScatter(kif2b_f, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+FeatureScatter(MCAK_f, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+FeatureScatter(MCAK_f, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+FeatureScatter(dnMCAK_f, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+FeatureScatter(dnMCAK_f, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+```
+
+```{r}
+# Remove objects to free memory and clean up workspace 
+rm(kif2b)
+rm(MCAK)
+rm(dnMCAK)
+rm(mitochondrial_genes)
+rm(ensembl_db)
+
+```
+
+# Combine datasets
+```{r}
+# Combine datasets
+scRNA_c <- merge(kif2b_f, y = c(MCAK_f, dnMCAK_f), add.cell.ids = c("kif2b", "MCAK", "dnMCAK"), project = "BakhoumCIN2018")
+
+scRNA_c
+
+colnames(scRNA_c) %>% head()
+colnames(scRNA_c) %>% tail()
+
+if(export){
+saveRDS(scRNA_c, file = paste0(source.output.dir, "/scRNA_c.rds"))
+  }
+```
+
+
