@@ -1,0 +1,545 @@
+---
+title: "Bakhoum et al 2018 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+#BiocManager::install("DropletUtils")
+# library(DropletUtils)
+# install.packages("Seurat")
+library(Seurat)
+# install.packages("patchwork")
+library(patchwork)
+# install.packages("ggrepel")
+library(ggrepel)
+# install.packages("sparseMatrixStats")
+library(sparseMatrixStats)
+#install.packages("msigdbr")
+library(msigdbr)
+# BiocManager::install("GO.db")
+library(GO.db)
+# BiocManager::install("GOstats")
+library(GOstats)
+# BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+# install.packages("tidyverse")
+library(tidyverse)
+# install.packages("proxy")
+library(proxy)
+# BiocManager::install("fgsea")
+library(fgsea)
+# install.packages('plotly')
+library(plotly)
+# install.packages('pheatmap')
+library(pheatmap)
+# install.packages("gplots")
+library(gplots)
+
+select = dplyr::select
+rename = dplyr::rename
+```
+
+# Loading data
+```{r}
+# Load filtered and combined data
+# scRNA_c <- readRDS(file = "data/scRNA_c.rds")
+
+export = FALSE
+
+# generate output dir path named data
+source.output.dir <- file.path("output_SCT")
+
+# if source output dir does not exist, create it
+# if (!dir.exists(source.output.dir)) {
+#     dir.create(source.output.dir)
+# } else{
+#   print("Output folder already exists")
+# }
+
+```
+
+## Load msigdb hallmarks gene set
+```{r}
+all_gene_sets <- msigdbr("Homo sapiens")
+
+msigdb_hallmarks_set <- filter(all_gene_sets, gs_cat == "H") %>% select(gs_name, gene_symbol)
+
+msigdb_hallmarks_set <- split(msigdb_hallmarks_set$gene_symbol, msigdb_hallmarks_set$gs_name)
+
+msigdb_hallmarks_names <- read.csv2("data/names_hallmarks.csv")
+
+rm(all_gene_sets)
+# Another option is loading files with gene sets
+# msigdb_hallmarks <- gmtPathways("data/h.all.v7.4.symbols.gmt")
+# msigdb_hallmarks %>% head() %>% lapply(head)
+
+```
+
+```{r}
+# Load object from Seurat instead of handling objects and computations in this script
+scRNA_SCT <- readRDS(file = paste0(source.output.dir, "/Bakhoum_scRNA_SCT.rds"))
+
+scRNA_SCT_cellreg <- readRDS(file = paste0(source.output.dir, "/Bakhoum_scRNA_SCT_cellreg.rds"))
+SCT_cellreg.cluster.DE <- read.csv2(file = paste0(source.output.dir, "/Bakhoum_scRNA_SCT_cellreg_cluster_markers.csv"))
+```
+
+# Using SCTransform
+
+```{r}
+# scRNA_SCT <- SCTransform(scRNA_c, verbose = FALSE)
+
+# Add CIN status meta data
+# scRNA_SCT@meta.data <- scRNA_SCT@meta.data %>% mutate(CIN_status = ifelse(orig.ident %in% c("dnMCAK"),"CIN-high","CIN-low"))
+
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can
+# segregate this list into markers of G2/M phase and markers of S phase
+# s.genes <- cc.genes$s.genes
+# g2m.genes <- cc.genes$g2m.genes
+
+# Score cell cycle
+# scRNA_SCT <- CellCycleScoring(scRNA_SCT, s.features = s.genes, g2m.features = g2m.genes)
+
+```
+
+## Perform PCA
+```{r}
+# Perform PCA
+# scRNA_SCT <- RunPCA(scRNA_SCT, npcs = 200)
+
+# Plot PCA results
+Idents(scRNA_SCT) <- "orig.ident"
+VizDimLoadings(scRNA_SCT, dims = 1:2, reduction = "pca")
+DimPlot(scRNA_SCT, reduction = "pca")
+ElbowPlot(scRNA_SCT, ndims = 200)
+
+# Check the total variance explained
+# On Seurat 3:
+pca <- scRNA_SCT[["pca"]]
+# Get the total variance of the scaled counts matrix:
+mat <- Seurat::GetAssayData(scRNA_SCT, assay = "SCT", slot = "scale.data")
+
+total_variance <- sum(matrixStats::rowVars(mat))
+
+eigValues = (pca@stdev)^2  ## EigenValues
+varExplained = eigValues / total_variance
+
+varExplained
+
+cumsum(varExplained) %>% as.data.frame() %>% rename("cumvar" = ".") %>% ggplot(aes(x = c(1:200), y = cumvar)) + geom_point() + labs(x = "PC #", y = "Cumulative Variance")
+
+rm(mat)
+rm(pca)
+
+```
+
+## Run UMAP and TSNE
+```{r}
+# This is not using the cell cycle regressed data! the visualization looks the same as before
+
+# Dimensionality reduction with UMAP on variable features instead of PCs
+# scRNA_SCT <- RunUMAP(scRNA_SCT, reduction.use = NULL, features = VariableFeatures(scRNA_SCT))
+
+# Store this UMAP as a custom reduction
+# scRNA_SCT[["UMAP_features"]] <- CreateDimReducObject(embeddings = scRNA_SCT@reductions$umap@cell.embeddings, key = "UMAP_features", assay = DefaultAssay(scRNA_SCT))
+
+# Run UMAP and project in 3D dimensions
+# scRNA_SCT <- RunUMAP(scRNA_SCT, dims = 1:200, n.components = 3L)
+
+# Store this UMAP as a custom reduction
+# scRNA_SCT[["umap3d"]] <- CreateDimReducObject(embeddings = scRNA_SCT@reductions$umap@cell.embeddings, key = "umap3d", assay = DefaultAssay(scRNA_SCT))
+
+
+# PCs seem to be using the regressed data as intended
+
+# Dimensionality reduction with UMAP on PCs
+scRNA_SCT <- RunUMAP(scRNA_SCT, dims = 1:200)
+
+```
+
+## Clustering cells
+```{r}
+# Clustering cells
+# scRNA_SCT <- FindNeighbors(scRNA_SCT, dims = 1:200)
+# scRNA_SCT <- FindClusters(scRNA_SCT, resolution = 0.5)
+# 
+# scRNA_SCT <- StashIdent(scRNA_SCT, save.name = "clusterID")
+
+# Inspect cluster information
+#head(Idents(scRNA_cn), 5)
+Idents(scRNA_SCT) <- "clusterID"
+
+table(scRNA_SCT$clusterID)
+prop.table(table(scRNA_SCT$clusterID))
+prop.table(table(scRNA_SCT$clusterID, scRNA_SCT$orig.ident), margin = 2)
+prop.table(table(scRNA_SCT$orig.ident, scRNA_SCT$clusterID), margin = 2)
+
+prop.table(table(scRNA_SCT$clusterID, scRNA_SCT$CIN_status), margin = 2)
+prop.table(table(scRNA_SCT$CIN_status, scRNA_SCT$clusterID), margin = 2)
+
+table(scRNA_SCT$clusterID, scRNA_SCT$CIN_status) %>% as.data.frame() %>% rename("clusterID" = Var1, "group" = Var2) %>% ggplot(aes(x = clusterID, y = group, fill = Freq)) + geom_tile() + scale_fill_distiller(palette = "PuBu") + geom_text(aes(label=Freq)) + labs(y = "", fill = "Number of cells")
+
+```
+## Visualization
+```{r}
+DimPlot(scRNA_SCT, reduction = "umap", group.by = "CIN_status")
+DimPlot(scRNA_SCT, reduction = "umap", group.by = "orig.ident")
+DimPlot(scRNA_SCT, reduction = "umap", group.by = "Phase")
+DimPlot(scRNA_SCT, reduction = "umap", group.by = "clusterID")
+
+```
+
+## 3D UMAP
+```{r}
+# Visualize what headings are called so that you can extract them to form a dataframe
+Embeddings(object = scRNA_SCT, reduction = "umap3d") %>% head()
+
+# Prepare a dataframe for cell plotting
+plot.data <- FetchData(object = scRNA_SCT, vars = c("umap3d_1", "umap3d_2", "umap3d_3", "seurat_clusters", "Phase", "orig.ident"))
+
+# Make a column of row name identities (these will be your cell/barcode names)
+plot.data$label <- paste(rownames(plot.data))
+
+# Plot your data
+#When you visualize your plotly object, hovering your mouse pointer over a point shows cell names
+
+fig <- plot_ly(data = plot.data, 
+        x = ~umap3d_1, y = ~umap3d_2, z = ~umap3d_3, 
+        color = ~seurat_clusters, 
+        colors = c("lightseagreen", "gray50", "darkgreen", "red4", "red", "turquoise4", "black", "yellow4", "royalblue1", "lightcyan3", "peachpuff3",
+"khaki3", "gray20", "orange2", "royalblue4", "yellow3", "gray80", "darkorchid1", "lawngreen", "plum2", "darkmagenta"),
+        type = "scatter3d", 
+        mode = "markers", 
+        marker = list(size = 3, width=2), # controls size of points
+        text=~orig.ident,
+        hoverinfo="text") 
+fig
+
+fig <- plot_ly(data = plot.data, 
+        x = ~umap3d_1, y = ~umap3d_2, z = ~umap3d_3, 
+        color = ~Phase,
+        type = "scatter3d", 
+        mode = "markers", 
+        marker = list(size = 3, width=2), # controls size of points
+        text=~orig.ident,
+        hoverinfo="text") 
+
+fig
+
+rm(plot.data)
+
+```
+
+## Export
+```{r}
+if(export){
+saveRDS(scRNA_SCT, file = paste0(source.output.dir, "/Bakhoum_scRNA_SCT.rds"))
+
+}
+
+# scRNA_SCT <- readRDS(file = paste0(source.output.dir, "/Bakhoum_scRNA_SCT.rds"))
+
+```
+
+# Using SCTransform and regressing cell cycle
+
+```{r}
+# scRNA_SCT_cellreg <- SCTransform(scRNA_c, verbose = FALSE)
+
+# Add CIN status meta data
+# scRNA_SCT_cellreg@meta.data <- scRNA_SCT_cellreg@meta.data %>% mutate(CIN_status = ifelse(orig.ident %in% c("dnMCAK"),"CIN-high","CIN-low"))
+
+# Score cell cycle
+# scRNA_SCT_cellreg <- CellCycleScoring(scRNA_SCT_cellreg, s.features = s.genes, g2m.features = g2m.genes)
+
+# Regress cell cycle scores
+# vars_to_regress <- c("S.Score", "G2M.Score")
+
+# scRNA_SCT_cellreg <- SCTransform(scRNA_SCT_cellreg, vars.to.regress = vars_to_regress, verbose = FALSE)
+
+```
+## Perform PCA
+```{r}
+# Perform PCA
+# scRNA_SCT_cellreg <- RunPCA(scRNA_SCT_cellreg, npcs = 200)
+
+# Plot PCA results
+Idents(scRNA_SCT_cellreg) <- "orig.ident"
+VizDimLoadings(scRNA_SCT_cellreg, dims = 1:2, reduction = "pca")
+DimPlot(scRNA_SCT_cellreg, reduction = "pca")
+ElbowPlot(scRNA_SCT_cellreg, ndims = 200)
+
+# Check the total variance explained
+# On Seurat 3:
+pca <- scRNA_SCT_cellreg[["pca"]]
+# Get the total variance of the scaled counts matrix:
+mat <- Seurat::GetAssayData(scRNA_SCT_cellreg, assay = "SCT", slot = "scale.data")
+
+total_variance <- sum(matrixStats::rowVars(mat))
+
+eigValues = (pca@stdev)^2  ## EigenValues
+varExplained = eigValues / total_variance
+
+varExplained
+
+cumsum(varExplained) %>% as.data.frame() %>% rename("cumvar" = ".") %>% ggplot(aes(x = c(1:200), y = cumvar)) + geom_point() + labs(x = "PC #", y = "Cumulative Variance")
+
+rm(mat)
+rm(pca)
+
+```
+
+## Clustering cells
+```{r}
+# Clustering cells
+# scRNA_SCT_cellreg <- FindNeighbors(scRNA_SCT_cellreg, dims = 1:200)
+# scRNA_SCT_cellreg <- FindClusters(scRNA_SCT_cellreg, resolution = 0.5)
+# 
+# scRNA_SCT_cellreg <- StashIdent(scRNA_SCT_cellreg, save.name = "clusterID")
+
+# Inspect cluster information
+#head(Idents(scRNA_cn), 5)
+Idents(scRNA_SCT_cellreg) <- "clusterID"
+
+table(scRNA_SCT_cellreg$clusterID)
+prop.table(table(scRNA_SCT_cellreg$clusterID))
+prop.table(table(scRNA_SCT_cellreg$clusterID, scRNA_SCT_cellreg$orig.ident), margin = 2)
+prop.table(table(scRNA_SCT_cellreg$orig.ident, scRNA_SCT_cellreg$clusterID), margin = 2)
+
+prop.table(table(scRNA_SCT_cellreg$clusterID, scRNA_SCT_cellreg$CIN_status), margin = 2)
+prop.table(table(scRNA_SCT_cellreg$CIN_status, scRNA_SCT_cellreg$clusterID), margin = 2)
+
+table(scRNA_SCT_cellreg$clusterID, scRNA_SCT_cellreg$CIN_status) %>% as.data.frame() %>% rename("clusterID" = Var1, "group" = Var2) %>% ggplot(aes(x = clusterID, y = group, fill = Freq)) + geom_tile() + scale_fill_distiller(palette = "PuBu") + geom_text(aes(label=Freq)) + labs(y = "", fill = "Number of cells")
+
+```
+
+```{r}
+cluster_assignment <- prop.table(table(scRNA_SCT_cellreg$CIN_status, scRNA_SCT_cellreg$clusterID), margin = 2) %>% as.data.frame() %>% rename("CIN_status" = Var1, "cluster" = Var2)
+
+cluster_assignment$CIN_status <- gsub("-", "_", cluster_assignment$CIN_status)
+
+cluster_assignment <- cluster_assignment %>% pivot_wider(values_from = Freq, names_from = CIN_status) %>% mutate(CIN_status = ifelse(CIN_high < 0.15, "CIN-low", "CIN-high"))
+
+cluster_assignment
+```
+
+## Run UMAP and TSNE
+```{r}
+# Dimensionality reduction with UMAP on variable features instead of PCs
+# scRNA_SCT_cellreg <- RunUMAP(scRNA_SCT_cellreg, assay = "SCT", reduction.use = NULL, features = VariableFeatures(scRNA_SCT_cellreg))
+
+# Store this UMAP as a custom reduction
+# scRNA_SCT_cellreg[["UMAP_features"]] <- CreateDimReducObject(embeddings = scRNA_SCT_cellreg@reductions$umap@cell.embeddings, key = "UMAP_features", assay = DefaultAssay(scRNA_SCT_cellreg))
+
+# Run UMAP and project in 3D dimensions
+# scRNA_SCT_cellreg <- RunUMAP(scRNA_SCT_cellreg, dims = 1:200, n.components = 3L)
+
+# Store this UMAP as a custom reduction
+# scRNA_SCT_cellreg[["umap3d"]] <- CreateDimReducObject(embeddings = scRNA_SCT_cellreg@reductions$umap@cell.embeddings, key = "umap3d", assay = DefaultAssay(scRNA_SCT_cellreg))
+
+# PCs seem to be using the regressed data as intended
+
+# Dimensionality reduction with UMAP on PCs
+# scRNA_SCT_cellreg <- RunUMAP(scRNA_SCT_cellreg, dims = 1:200)
+
+```
+
+## Visualization
+```{r}
+DimPlot(scRNA_SCT_cellreg, reduction = "umap", group.by = "CIN_status")
+DimPlot(scRNA_SCT_cellreg, reduction = "umap", group.by = "orig.ident")
+DimPlot(scRNA_SCT_cellreg, reduction = "umap", group.by = "Phase")
+DimPlot(scRNA_SCT_cellreg, reduction = "umap", group.by = "clusterID")
+```
+
+## 3D UMAP
+```{r}
+# Visualize what headings are called so that you can extract them to form a dataframe
+Embeddings(object = scRNA_SCT_cellreg, reduction = "umap3d") %>% head()
+
+# Prepare a dataframe for cell plotting
+plot.data <- FetchData(object = scRNA_SCT_cellreg, vars = c("umap3d_1", "umap3d_2", "umap3d_3", "seurat_clusters", "Phase", "orig.ident"))
+
+# Make a column of row name identities (these will be your cell/barcode names)
+plot.data$label <- paste(rownames(plot.data))
+
+# Plot your data
+#When you visualize your plotly object, hovering your mouse pointer over a point shows cell names
+
+fig <- plot_ly(data = plot.data, 
+        x = ~umap3d_1, y = ~umap3d_2, z = ~umap3d_3, 
+        color = ~seurat_clusters, 
+        colors = c("lightseagreen", "gray50", "darkgreen", "red4", "red", "turquoise4", "black", "yellow4", "royalblue1", "lightcyan3", "peachpuff3", "khaki3", "gray20", "orange2", "royalblue4", "yellow3", "gray80", "darkorchid1", "lawngreen", "plum2", "darkmagenta"),
+        type = "scatter3d", 
+        mode = "markers", 
+        marker = list(size = 3, width=2), # controls size of points
+        text=~orig.ident,
+        hoverinfo="text") 
+fig
+
+fig <- plot_ly(data = plot.data, 
+        x = ~umap3d_1, y = ~umap3d_2, z = ~umap3d_3, 
+        color = ~Phase,
+        type = "scatter3d", 
+        mode = "markers", 
+        marker = list(size = 3, width=2), # controls size of points
+        text=~orig.ident,
+        hoverinfo="text") 
+
+fig
+
+rm(plot.data)
+
+```
+
+## Cluster markers
+```{r}
+# Find cluster markers 
+Idents(scRNA_SCT_cellreg) <- "clusterID"
+# SCT_cellreg.cluster.DE <- FindAllMarkers(scRNA_SCT_cellreg, min.pct = 0.05, logfc.threshold = 0)
+
+#cluster.markers
+clustertop10 <- SCT_cellreg.cluster.DE %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+
+SCT_cellreg.cluster.DE %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+
+```
+
+## Plotting signatures
+```{r}
+Idents(scRNA_SCT_cellreg) <- "clusterID"
+
+# Plotting EMT signature 
+EMT_signature <- c("VIM", "ZEB2", "SNAI2", "ZEB1")
+
+VlnPlot(scRNA_SCT_cellreg, features = EMT_signature)
+FeaturePlot(scRNA_SCT_cellreg, features = EMT_signature)
+
+EMT_signature2 <- c("EZH", "JUN", "VIM", "STEAP1", "SOX4", "MMP14", "SHH", "TIMP1", "ZEB1")
+
+EMT_signature2 <- EMT_signature2[EMT_signature2 %in% rownames(scRNA_SCT_cellreg@assays$RNA)]
+
+Idents(scRNA_SCT_cellreg) <- "clusterID"
+for(i in 1:length(EMT_signature2)){
+p <- VlnPlot(scRNA_SCT_cellreg, features = EMT_signature2[i])
+print(p)
+}
+
+```
+
+```{r}
+# Plotting Genes enriched in the "M" Population from Bakhoum et al
+M_markers = c("ITGB5", "ITGB1", "ITGA5", "ITGA10", "IGFBP4", "FN1", "DSC2", "CXCL1","CTNNB1", "BMP4", "BCL2L1")
+
+for(i in 1:length(M_markers)){
+p <- VlnPlot(scRNA_SCT_cellreg, features = M_markers[i])
+print(p)
+}
+```
+
+```{r}
+# Plot CIN signature from Bakhoum et al 2018 (Supp. table 5), comparing CIN high and CIN low
+CIN_signature <- c('PELI2','BMP2','SHH','TNS4','RAB3B','ROBO1','ARHGAP28','CHN2','CST1','F13A1','CPVL','SEMA6D','NHSL2','GTF2IP7','DPYSL3','PCDH7','KHDRBS3','TRAC','TMEM156',
+'CST4','CD24','FGF5','NTN4')
+
+CIN_present <- CIN_signature %in% rownames(scRNA_SCT_cellreg@assays$RNA)
+
+for(i in 1:length(CIN_present)){
+p <- VlnPlot(scRNA_SCT_cellreg, features = CIN_signature[CIN_present][i])
+print(p)
+}
+
+```
+
+## FGSEA DE between clusters
+```{r}
+SCT.cellreg.cluster.DE.fgsea_summary <- read.csv2(file = paste0(source.output.dir, "/scRNA_SCT_cellreg_cluster_fgsea.csv"))
+SCT.cellreg.cluster.DE.fgsea <- SCT.cellreg.cluster.DE.fgsea_summary %>% split(f = SCT.cellreg.cluster.DE.fgsea_summary$cluster)
+
+
+scRNA_SCT_cellreg.l <- SCT_cellreg.cluster.DE %>% select(gene, cluster, avg_log2FC) %>% split(f = SCT_cellreg.cluster.DE$cluster)
+
+SCT.cellreg.cluster.DE.fgsea <- scRNA_SCT_cellreg.l %>% lapply(FUN = function(x){
+  x <- x %>% select(-cluster) %>% deframe()
+  x <- fgsea(pathways = msigdb_hallmarks_set, 
+                  stats = x,
+                  minSize = 15,
+                  maxSize = 500)
+})
+
+
+# Plot results for the GSEA on each cluster 
+lapply(seq_along(SCT.cellreg.cluster.DE.fgsea), FUN = function(i){
+  SCT.cellreg.cluster.DE.fgsea[[i]] <- SCT.cellreg.cluster.DE.fgsea[[i]] %>% mutate(
+    within_threshold = pval < 0.05, 
+    pval = ifelse(pval < 0.0001, 0.000101, pval)
+    ) %>% left_join(msigdb_hallmarks_names)
+
+  SCT.cellreg.cluster.DE.fgsea[[i]] %>% ggplot(aes(x = log10(pval), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = as.factor(sign(NES)))) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(pval), y = NES, label = name), data = SCT.cellreg.cluster.DE.fgsea[[i]] %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+  ) +
+  labs(x = "log10(pval)", y = "Normalized Enrichment Score", col = "Enriched in Cluster", title = paste("Cluster: ", i - 1, sep = "")) + 
+  scale_y_continuous(limits = c(-3,3), breaks = seq(-3,3,1)) + 
+  scale_x_continuous(trans = "reverse", limits = c(0, -4), breaks = c(-4, -3, -2, -1, 0) , labels = c("<0.0001", "0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+})
+
+
+# Combine summaries from the GO enrichment tests
+SCT.cellreg.cluster.DE.fgsea_summary <- SCT.cellreg.cluster.DE.fgsea[[1]] %>% mutate(cluster = 0) %>% filter(pval == "nothing")
+
+for(i in 1:length(SCT.cellreg.cluster.DE.fgsea)){
+  print(i)
+  SCT.cellreg.cluster.DE.fgsea_summary <- rbind(
+    SCT.cellreg.cluster.DE.fgsea_summary, 
+    SCT.cellreg.cluster.DE.fgsea[[i]] %>% mutate(cluster = i-1)
+    )
+}
+
+if(export){
+SCT.cellreg.cluster.DE.fgsea_summary %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNA_SCT_cellreg_cluster_fgsea.csv"), row.names = FALSE)
+  }
+
+```
+## Heatmap Cluster NES
+```{r}
+colfunc <- colorRampPalette(c("blue", "white", "red"))
+
+SCT.cellreg.cluster.DE.fgsea_summary %>% left_join(msigdb_hallmarks_names) %>% select(name, NES, cluster) %>% pivot_wider(values_from = NES, names_from = name) %>% column_to_rownames("cluster") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix() %>% pheatmap(col=colfunc(10))
+
+SCT.cellreg.cluster.DE.fgsea_summary %>% left_join(msigdb_hallmarks_names) %>% select(name, NES, cluster) %>% pivot_wider(values_from = NES, names_from = name)  %>% 
+  column_to_rownames(var = "cluster") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix() %>%
+  heatmap.2(col=colfunc(10), dendrogram = "both", trace = "none", srtCol=75)
+
+```
+## Export
+```{r}
+if(export){
+saveRDS(scRNA_SCT_cellreg, file = paste0(source.output.dir, "/Bakhoum_scRNA_SCT_cellreg.rds"))
+  
+SCT_cellreg.cluster.DE %>% write.csv2(file = paste0(source.output.dir, "/Bakhoum_scRNA_SCT_cellreg_cluster_markers.csv")
+, row.names = FALSE)
+}
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+# packageVersion("DESeq2")
+# packinfo <- installed.packages(fields = c("Package", "Version"))
+# packinfo[,c("Package", "Version")]
+# packinfo["graphics",c("Package", "Version")]
+
+```

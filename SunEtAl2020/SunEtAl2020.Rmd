@@ -1,0 +1,462 @@
+---
+title: "Bakhoum et al 2018 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = FALSE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+#BiocManager::install("DropletUtils")
+# library(DropletUtils)
+# install.packages("Seurat")
+library(Seurat)
+# install.packages("sparseMatrixStats")
+library(sparseMatrixStats)
+# install.packages("tidyverse")
+library(tidyverse)
+library(readxl)
+
+```
+
+# Loading data
+```{r}
+export = TRUE
+
+# generate output dir path named data
+source.output.dir <- file.path("output_sc")
+
+expression_data = read.table(file = "data/HCC_log_tpm_expression_matrix.txt", header = TRUE)
+
+metadata = read.table(file = "data/HCC_cell_metadata.txt", header = TRUE, sep = "\t")
+
+metadata = metadata[2:16499, ] # Remove second line - alternative header
+
+patient_metadata <- read_excel("data/1-s2.0-S0092867420316135-mmc1.xlsx", skip = 1)
+
+cell_fractions <- read_excel("data/1-s2.0-S0092867420316135-mmc2.xlsx", skip = 1)
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+} else{
+  print("Output folder already exists")
+}
+
+```
+
+```{r}
+head(expression_data)
+summary(patient_metadata %>% select(-13) %>% mutate_if(is.character, as.factor))
+
+summary(metadata %>% mutate_if(is.character, as.factor))
+
+summary(cell_fractions)
+```
+
+```{r}
+scSun <- CreateSeuratObject(counts = expression_data %>% column_to_rownames("gene"), project = "SunEtAl2020")
+
+scSun@meta.data <- scSun@meta.data %>% cbind(metadata)
+```
+
+# Inspecting dataset, QC plots
+```{r}
+# Load ensembl gene database
+ensembl_db <- read.csv("EnsDb.Hsapiens.v86.csv")
+
+# Check whether mitochondrial genes are present in the samples
+mitochondrial_genes <- ensembl_db %>% filter(str_detect(symbol, "^MT-"))
+
+mitochondrial_genes$symbol %in% rownames(scSun) %>% sum()
+```
+
+```{r}
+# Compute the % of mitochondrial counts
+scSun[["percent.mt"]] <- PercentageFeatureSet(scSun, pattern = "^MT-") %>% mutate_all(~replace(., is.na(.), 0))
+```
+
+```{r}
+# QC plots based on number of counts, features and % of mitochondrial genes
+VlnPlot(scSun, features = c("nFeature_RNA"))
+VlnPlot(scSun, features = c("nCount_RNA"))
+VlnPlot(scSun, features = c("percent.mt"))
+
+
+FeatureScatter(scSun, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+FeatureScatter(scSun, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+```
+
+
+```{r}
+# Remove objects to free memory and clean up workspace 
+rm(mitochondrial_genes)
+rm(ensembl_db)
+```
+
+```{r}
+if(export){
+saveRDS(scSun, file = paste0(source.output.dir, "/scSun.rds"))
+}
+```
+
+# Normalize and scale
+```{r}
+median_library_size <- scSun@assays$RNA %>% colSums() %>% median()
+
+# Normalize dataset
+scSun_n <- NormalizeData(scSun, normalization.method = "LogNormalize", scale.factor = median_library_size)
+
+# find highly variable features with a variance stabilizing transform
+scSun_n <- FindVariableFeatures(scSun_n, selection.method = "vst", nfeatures = 2000)
+
+VariableFeaturePlot(scSun_n) %>% LabelPoints(points = head(VariableFeatures(scSun_n), 30), repel = TRUE)
+
+# Scale dataset
+scSun_n <- ScaleData(scSun_n, features = rownames(scSun_n))
+```
+
+# Perform PCA
+```{r}
+# Perform PCA
+scSun_n <- RunPCA(scSun_n, features = VariableFeatures(object = scSun_n), npcs = 200)
+
+# Plot PCA results
+Idents(scSun_n) <- "orig.ident"
+VizDimLoadings(scSun_n, dims = 1:2, reduction = "pca")
+DimPlot(scSun_n, reduction = "pca")
+ElbowPlot(scSun_n, ndims = 200)
+
+DimHeatmap(scSun_n, dims = 1:10, cells = 500, balanced = TRUE)
+
+# Check the total variance explained
+# On Seurat 3:
+pca <- scSun_n[["pca"]]
+# Get the total variance of the scaled counts matrix:
+mat <- Seurat::GetAssayData(scSun_n, assay = "RNA", slot = "scale.data")
+mat <- mat[rownames(mat) %in% VariableFeatures(scSun_n), ]
+
+total_variance <- sum(matrixStats::rowVars(mat))
+
+eigValues = (pca@stdev)^2  ## EigenValues
+varExplained = eigValues / total_variance
+
+# varExplained
+
+cumsum(varExplained) %>% as.data.frame() %>% rename("." = "cumvar") %>% ggplot(aes(x = c(1:200), y = cumvar)) + geom_point() + labs(x = "PC #", y = "Cumulative Variance")
+
+rm(mat)
+rm(pca)
+```
+
+# Cell cycle assignment
+```{r}
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can
+# segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+
+# Assign and inspect cell cycle scores
+scSun_n <- CellCycleScoring(scSun_n, s.features = s.genes, g2m.features = g2m.genes)
+
+scSun_n[[]] %>% select(S.Score, G2M.Score, Phase) %>% mutate_if(is.character, as.factor) %>% summary()
+```
+# Run UMAP and TSNE
+```{r}
+# Dimensionality reduction with UMAP on variable features instead of PCs
+scSun_n <- RunUMAP(scSun_n, reduction.use = NULL, features = VariableFeatures(scSun_n))
+
+# Store this UMAP as a custom reduction
+scSun_n[["UMAP_features"]] <- CreateDimReducObject(embeddings = scSun_n@reductions$umap@cell.embeddings, key = "UMAP_features", assay = DefaultAssay(scSun_n))
+
+# Run UMAP and project in 3D dimensions
+scSun_n <- RunUMAP(scSun_n, dims = 1:200, n.components = 3L)
+
+# Store this UMAP as a custom reduction
+scSun_n[["umap3d"]] <- CreateDimReducObject(embeddings = scSun_n@reductions$umap@cell.embeddings, key = "umap3d", assay = DefaultAssay(scSun_n))
+
+# Dimensionality reduction with UMAP and tSNE on PCs
+scSun_n <- RunUMAP(scSun_n, dims = 1:200)
+
+scSun_n <- RunTSNE(scSun_n, dims.use = 1:200, reduction.use = "pca", perplexity = 30)
+
+```
+# Clustering cells
+```{r}
+scSun_n <- FindNeighbors(scSun_n, features = VariableFeatures(object = scSun_n))
+scSun_n <- FindClusters(scSun_n, resolution = 0.35)
+scSun_n <- StashIdent(scSun_n, save.name = "clusterID")
+
+# Inspect cluster information
+Idents(scSun_n) <- "clusterID"
+
+table(scSun_n$orig.ident)
+table(scSun_n$clusterID)
+table(scSun_n$Phase)
+table(scSun_n$cell_type)
+
+
+prop.table(table(scSun_n$clusterID, scSun_n$orig.ident), margin = 2)
+prop.table(table(scSun_n$orig.ident, scSun_n$clusterID), margin = 2)
+
+table(scSun_n$clusterID, scSun_n$orig.ident) %>% as.data.frame() %>% rename("clusterID" = Var1, "group" = Var2) %>% ggplot(aes(x = clusterID, y = group, fill = Freq)) + geom_tile() + scale_fill_distiller(palette = "PuBu") + geom_text(aes(label=Freq)) + labs(y = "", fill = "Number of cells")
+
+```
+```{r}
+scSun_n@meta.data <- scSun_n@meta.data %>% mutate(
+  cell_class = ifelse(str_detect(cell_type, "Tumor"), "tumor", "non_tumor"),
+  annotation = ifelse(cell_class == "tumor", paste0(cell_class, "_", orig.ident), cell_class))
+```
+
+# Visualization
+```{r}
+DimPlot(scSun_n, reduction = "UMAP_features", group.by = "orig.ident")
+DimPlot(scSun_n, reduction = "UMAP_features", group.by = "cell_type")
+DimPlot(scSun_n, reduction = "UMAP_features", group.by = "Phase")
+DimPlot(scSun_n, reduction = "UMAP_features", group.by = "clusterID")
+DimPlot(scSun_n, reduction = "UMAP_features", group.by = "cell_class")
+
+DimPlot(scSun_n, reduction = "umap", group.by = "orig.ident")
+DimPlot(scSun_n, reduction = "umap", group.by = "cell_type")
+DimPlot(scSun_n, reduction = "umap", group.by = "Phase")
+DimPlot(scSun_n, reduction = "umap", group.by = "clusterID")
+DimPlot(scSun_n, reduction = "umap", group.by = "cell_class")
+DimPlot(scSun_n, reduction = "umap", group.by = "annotation")
+
+DimPlot(scSun_n, reduction = "tsne", group.by = "orig.ident")
+DimPlot(scSun_n, reduction = "tsne", group.by = "cell_type")
+DimPlot(scSun_n, reduction = "tsne", group.by = "Phase")
+DimPlot(scSun_n, reduction = "tsne", group.by = "clusterID")
+DimPlot(scSun_n, reduction = "tsne", group.by = "cell_class")
+DimPlot(scSun_n, reduction = "tsne", group.by = "annotation")
+
+```
+# 3D UMAP
+```{r}
+# Extract cell embedding information from Seurat Object
+# umap_1 <- scSun_n[["umap3d"]]@cell.embeddings[,1]
+# umap_2 <- scSun_n[["umap3d"]]@cell.embeddings[,2]
+# umap_3 <- scSun_n[["umap3d"]]@cell.embeddings[,3]
+
+# Visualize what headings are called so that you can extract them to form a dataframe
+Embeddings(object = scSun_n, reduction = "umap") %>% head()
+Embeddings(object = scSun_n, reduction = "umap3d") %>% head()
+
+# Prepare a dataframe for cell plotting
+plot.data <- FetchData(object = scSun_n, vars = c("umap3d_1", "umap3d_2", "umap3d_3", "seurat_clusters", "Phase", "orig.ident", "cell_type"))
+
+# Make a column of row name identities (these will be your cell/barcode names)
+plot.data$label <- paste(rownames(plot.data))
+
+# Plot your data
+#When you visualize your plotly object, hovering your mouse pointer over a point shows cell names
+
+fig <- plot_ly(data = plot.data, 
+        x = ~umap3d_1, y = ~umap3d_2, z = ~umap3d_3, 
+        color = ~orig.ident, 
+        colors = c("lightseagreen", "gray50", "darkgreen", "red4", "red", "turquoise4", "black", "yellow4", "royalblue1", "lightcyan3", "peachpuff3",
+"khaki3", "gray20", "orange2", "royalblue4", "yellow3", "gray80", 
+"darkorchid1", "lawngreen", "plum2", "darkmagenta"),
+        type = "scatter3d", 
+        mode = "markers", 
+        marker = list(size = 3, width=2), # controls size of points
+        text=~seurat_clusters,
+        hoverinfo="text") 
+fig
+
+fig <- plot_ly(data = plot.data, 
+        x = ~umap3d_1, y = ~umap3d_2, z = ~umap3d_3, 
+        color = ~cell_type, 
+        colors = c("lightseagreen", "gray50", "darkgreen", "red4", "red", "turquoise4", "black", "yellow4", "royalblue1", "lightcyan3", "peachpuff3",
+"khaki3", "gray20", "orange2", "royalblue4", "yellow3", "gray80", 
+"darkorchid1", "lawngreen", "plum2", "darkmagenta"),
+        type = "scatter3d", 
+        mode = "markers", 
+        marker = list(size = 3, width=2), # controls size of points
+        text=~seurat_clusters,
+        hoverinfo="text") 
+fig
+
+fig <- plot_ly(data = plot.data, 
+        x = ~umap3d_1, y = ~umap3d_2, z = ~umap3d_3, 
+        color = ~Phase,
+        type = "scatter3d", 
+        mode = "markers", 
+        marker = list(size = 3, width=2), # controls size of points
+        text=~orig.ident,
+        hoverinfo="text") 
+
+fig
+
+rm(plot.data)
+```
+
+# Cluster markers
+```{r} 
+# Find cluster markers 
+Idents(scSun_n) <- "cell_type"
+
+# cell_type.DE <- FindAllMarkers(scSun_n, min.pct = 0.2, logfc.threshold = 0, pseudocount.use = 0.001)
+
+# top10 <- cell_type.DE %>% group_by(cell_type) %>% top_n(n = 10, wt = avg_log2FC)
+
+# cell_type.DE %>% group_by(cell_type) %>% top_n(n = 5, wt = avg_log2FC)
+
+# DoHeatmap(scSun_n, features = top10$gene) + NoLegend()
+```
+
+# Plotting signatures
+```{r}
+# Plotting EMT signature # Supp table 5f
+EMT_signature <- c("EZH", "JUN", "VIM", "STEAP1", "SOX4", "MMP14", "SHH", "TIMP1", "ZEB1", "ZEB2", "SNAI2")
+
+EMT_signature <- EMT_signature[EMT_signature %in% rownames(scSun_n@assays$RNA)]
+
+Idents(scSun_n) <- "clusterID"
+for(i in 1:length(EMT_signature)){
+p <- VlnPlot(scSun_n, features = EMT_signature[i])
+print(p)
+}
+```
+
+```{r}
+# Plotting Genes enriched in the "M" Population from Bakhoum et al Extended figure 6b 
+M_markers = c("ITGB5", "ITGB1", "ITGA5", "ITGA10", "IGFBP4", "FN1", "DSC2", "CXCL1","CTNNB1", "BMP4", "BCL2L1", "VIM", "TIMP1", "TGFBR2", "TGFBI", "TGFB1", "PPARG", "NUPR1", "MSN", "LMCD1", "LEF1", "JAG1")
+
+M_markers <- M_markers[M_markers %in% rownames(scSun_n@assays$RNA)]
+
+Idents(scSun_n) <- "clusterID"
+for(i in 1:length(M_markers)){
+p <- VlnPlot(scSun_n, features = M_markers[i])
+print(p)
+}
+```
+
+```{r}
+# Plot CIN signature from Bakhoum et al 2018 (Supp. table 5), comparing CIN high and CIN low in bulk data
+CIN_signature <- c('PELI2','BMP2','SHH','TNS4','RAB3B','ROBO1','ARHGAP28','CHN2','CST1','F13A1','CPVL','SEMA6D','NHSL2','GTF2IP7','DPYSL3','PCDH7','KHDRBS3','TRAC','TMEM156', 'CST4','CD24','FGF5','NTN4')
+
+CIN_signature <- CIN_signature[CIN_signature %in% rownames(scSun_n@assays$RNA)]
+
+Idents(scSun_n) <- "clusterID"
+for(i in 1:length(CIN_signature)){
+p <- VlnPlot(scSun_n, features = CIN_signature[i])
+print(p)
+}
+
+```
+
+# Export
+```{r}
+if(export){
+saveRDS(scSun_n, file = paste0(source.output.dir, "/scSun_n.rds"))
+}
+
+scSun_n <- readRDS(file = paste0(source.output.dir, "/scSun_n.rds"))
+
+```
+
+# Load msigdb hallmarks gene set
+```{r}
+# all_gene_sets <- msigdbr("Homo sapiens")
+
+# msigdb_hallmarks_set <- filter(all_gene_sets, gs_cat == "H") %>% select(gs_name, gene_symbol)
+
+# msigdb_hallmarks_set <- split(msigdb_hallmarks_set$gene_symbol, msigdb_hallmarks_set$gs_name)
+
+# msigdb_hallmarks_names <- read.csv2("data/names_hallmarks.csv")
+
+# rm(all_gene_sets)
+```
+
+# FGSEA DE between clusters
+```{r}
+# cluster.DE.fgsea_summary <- read.csv2(file = paste0(source.output.dir, "/scRNA_cluster_fgsea.csv"))
+# cluster.DE.fgsea <- cluster.DE.fgsea_summary %>% split(f = cluster.DE.fgsea_summary$cluster)
+
+# cluster.DE.l <- cluster.DE %>% select(gene, cluster, avg_log2FC) %>% split(f = cluster.DE$cluster)
+
+# cluster.DE.fgsea <- cluster.DE.l %>% lapply(FUN = function(x){
+#   x <- x %>% select(-cluster) %>% deframe()
+#   x <- fgsea(pathways = msigdb_hallmarks_set, 
+#                   stats = x,
+#                   minSize = 15,
+#                   maxSize = 500)
+# })
+
+# Plot results for the GSEA on each cluster 
+# lapply(seq_along(cluster.DE.fgsea), FUN = function(i){
+#   cluster.DE.fgsea[[i]] <- cluster.DE.fgsea[[i]] %>% mutate(
+#     within_threshold = padj < 0.1, 
+#     padj = ifelse(padj < 0.0001, 0.000101, padj)
+#     ) %>% left_join(msigdb_hallmarks_names)
+# 
+#   cluster.DE.fgsea[[i]] %>% ggplot(aes(x = log10(padj), y = NES)) +
+#   geom_point(aes(size = 0.5, alpha = 0.3, col = as.factor(sign(NES)))) + 
+#   geom_hline(yintercept = 0, col = "black") +
+#   geom_text_repel(
+#   aes(x = log10(padj), y = NES, label = name), data = cluster.DE.fgsea[[i]] %>% filter(within_threshold | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+#   ) +
+#   labs(x = "log10(padj)", y = "Normalized Enrichment Score", col = "Enriched in Cluster", title = paste("Cluster: ", i - 1, sep = "")) + 
+#   scale_y_continuous(limits = c(-3.5,3.5), breaks = seq(-3.5,3.5,0.5)) + 
+#   scale_x_continuous(trans = "reverse", limits = c(0, -4), breaks = c(-4, -3, -2, -1, 0) , labels = c("<0.0001", "0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+# })
+
+# Combine summaries from the GO enrichment tests
+# cluster.DE.fgsea_summary <- cluster.DE.fgsea[[1]] %>% mutate(cluster = 0) %>% filter(pval == "nothing")
+# 
+# for(i in 1:length(cluster.DE.fgsea)){
+#   print(i)
+#   cluster.DE.fgsea_summary <- rbind(
+#     cluster.DE.fgsea_summary, 
+#     cluster.DE.fgsea[[i]] %>% mutate(cluster = i-1)
+#     )
+# }
+
+# if(export){
+# cluster.DE.fgsea_summary %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNA_cluster_fgsea.csv"), row.names = FALSE)
+# }
+```
+
+## Heatmap Cluster NES
+```{r}
+save_pheatmap_png <- function(x, filename, width=1200, height=1200, res = 300) {
+  png(filename, width = width, height = height, res = res)
+  grid::grid.newpage()
+  grid::grid.draw(x$gtable)
+  dev.off()
+}
+
+colfunc <- colorRampPalette(c("blue", "white", "red"))
+
+# heatmap_data <- cluster.DE.fgsea_summary %>% mutate(NES = ifelse(padj < 0.2, NES, 0)) %>% left_join(msigdb_hallmarks_names) %>% select(name, NES, cluster) %>% pivot_wider(values_from = NES, names_from = name) %>% column_to_rownames("cluster") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix() 
+# 
+# heatmap_data %>% pheatmap(color = colfunc(10))
+# NES_cluster_pheatmap <- heatmap_data %>% pheatmap(color = colfunc(10))
+
+# heatmap_data %>% heatmap.2(col=colfunc(10), dendrogram = "both", trace = "none", srtCol = 75, lwid = c(0.5,2), lhei = c(0.4, 1))
+
+# if(export){
+# save_pheatmap_png(NES_cluster_pheatmap, filename = paste0(source.output.dir, "/NES_clustering_pheatmap.png"), width=2000, height=1200)
+# }
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+# packageVersion("DESeq2")
+# packinfo <- installed.packages(fields = c("Package", "Version"))
+# packinfo[,c("Package", "Version")]
+# packinfo["graphics",c("Package", "Version")]
+
+```
+

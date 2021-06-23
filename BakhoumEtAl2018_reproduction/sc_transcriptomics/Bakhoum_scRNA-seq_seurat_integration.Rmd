@@ -1,0 +1,287 @@
+---
+title: "Bakhoum et al 2018 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+#BiocManager::install("DropletUtils")
+# library(DropletUtils)
+# install.packages("Seurat")
+library(Seurat)
+# install.packages("patchwork")
+library(patchwork)
+# install.packages("ggrepel")
+library(ggrepel)
+# install.packages("sparseMatrixStats")
+library(sparseMatrixStats)
+#install.packages("msigdbr")
+library(msigdbr)
+# BiocManager::install("GO.db")
+library(GO.db)
+# BiocManager::install("GOstats")
+library(GOstats)
+# BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+# install.packages("tidyverse")
+library(tidyverse)
+# install.packages("proxy")
+library(proxy)
+# BiocManager::install("fgsea")
+library(fgsea)
+# install.packages('plotly')
+library(plotly)
+# install.packages('pheatmap')
+library(pheatmap)
+# install.packages("gplots")
+library(gplots)
+
+select = dplyr::select
+rename = dplyr::rename
+```
+
+# Loading data
+```{r}
+# Load data from 10x into Seurat
+if (FALSE) {
+# For output from CellRanger < 3.0
+data_dir <- 'path/to/data/directory'
+list.files(data_dir) # Should show barcodes.tsv, genes.tsv, and matrix.mtx
+expression_matrix <- Read10X(data.dir = data_dir)
+seurat_object = CreateSeuratObject(counts = expression_matrix)
+
+# For output from CellRanger >= 3.0 with multiple data types
+data_dir <- 'path/to/data/directory'
+list.files(data_dir) # Should show barcodes.tsv.gz, features.tsv.gz, and matrix.mtx.gz
+data <- Read10X(data.dir = data_dir)
+seurat_object = CreateSeuratObject(counts = data$`Gene Expression`)
+seurat_object[['Protein']] = CreateAssayObject(counts = data$`Antibody Capture`)
+}
+
+
+data_dir <- 'data/CINdata/kif2b/'
+list.files(data_dir) # Should show barcodes.tsv, genes.tsv, and matrix.mtx
+kif2b_expression_matrix <- Read10X(data.dir = data_dir)
+kif2b = CreateSeuratObject(counts = kif2b_expression_matrix, project = "kif2b")
+
+data_dir <- 'data/CINdata/MCAK/'
+MCAK_expression_matrix <- Read10X(data.dir = data_dir)
+MCAK = CreateSeuratObject(counts = MCAK_expression_matrix, project = "MCAK")
+
+data_dir <- 'data/CINdata/MCAK-Hypir/'
+dnMCAK_expression_matrix <- Read10X(data.dir = data_dir)
+dnMCAK = CreateSeuratObject(counts = dnMCAK_expression_matrix, project = "dnMCAK")
+
+
+export = FALSE
+
+# generate output dir path named data
+source.output.dir <- file.path("output_sc_integration")
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+} else{
+  print("Output folder already exists")
+}
+
+# Remove objects to free memory and clean up workspace 
+rm(kif2b_expression_matrix)
+rm(MCAK_expression_matrix)
+rm(dnMCAK_expression_matrix)
+rm(data_dir)
+rm(source.output.dir)
+```
+
+```{r}
+# Compute the % of mitochondrial counts
+kif2b[["percent.mt"]] <- PercentageFeatureSet(kif2b, pattern = "^MT-") %>% mutate_all(~replace(., is.na(.), 0))
+MCAK[["percent.mt"]] <- PercentageFeatureSet(MCAK, pattern = "^MT-") %>% mutate_all(~replace(., is.na(.), 0))
+dnMCAK[["percent.mt"]] <- PercentageFeatureSet(dnMCAK, pattern = "^MT-") %>% mutate_all(~replace(., is.na(.), 0))
+```
+
+# Filter datasets
+```{r}
+# Filter dataset based on # of features, counts and mitocondrial %
+kif2b_f <- subset(kif2b, subset = nFeature_RNA > 200 & percent.mt < 15 & nCount_RNA > 5000)
+MCAK_f <- subset(MCAK, subset = nFeature_RNA > 200 & percent.mt < 15 & nCount_RNA > 5000)
+dnMCAK_f <- subset(dnMCAK, subset = nFeature_RNA > 200 & percent.mt < 15 & nCount_RNA > 5000)
+
+kif2b_f
+MCAK_f
+dnMCAK_f
+
+nrow(kif2b_f@meta.data) + nrow(MCAK_f@meta.data) + nrow(dnMCAK_f@meta.data)
+```
+
+```{r}
+# Remove objects to free memory and clean up workspace 
+rm(kif2b)
+rm(MCAK)
+rm(dnMCAK)
+rm(mitochondrial_genes)
+rm(ensembl_db)
+
+```
+
+# Inspect Batch effects
+Look for batch effects by scaling and normalizing each dataset individually first, then merging
+```{r}
+# To compare batch effects, normalize and scale each dataset individually, then merge
+
+# Kif2b
+median_library_size <- kif2b_f@assays$RNA %>% colSums() %>% median()
+# Normalize dataset
+kif2b_fn <- NormalizeData(kif2b_f, normalization.method = "LogNormalize", scale.factor = median_library_size)
+# find highly variable features with a variance stabilizing transform
+kif2b_fn <- FindVariableFeatures(kif2b_fn, selection.method = "vst", nfeatures = 2000)
+
+
+# Scale dataset
+kif2b_fn <- ScaleData(kif2b_fn, features = rownames(kif2b_fn))
+
+# MCAK
+median_library_size <- MCAK_f@assays$RNA %>% colSums() %>% median()
+# Normalize dataset
+MCAK_fn <- NormalizeData(MCAK_f, normalization.method = "LogNormalize", scale.factor = median_library_size)
+# find highly variable features with a variance stabilizing transform
+MCAK_fn <- FindVariableFeatures(MCAK_fn, selection.method = "vst", nfeatures = 2000)
+# Scale dataset
+MCAK_fn <- ScaleData(MCAK_fn, features = rownames(MCAK_fn))
+
+
+# dnMCAK
+median_library_size <- dnMCAK_f@assays$RNA %>% colSums() %>% median()
+# Normalize dataset
+dnMCAK_fn <- NormalizeData(dnMCAK_f, normalization.method = "LogNormalize", scale.factor = median_library_size)
+# find highly variable features with a variance stabilizing transform
+dnMCAK_fn <- FindVariableFeatures(dnMCAK_fn, selection.method = "vst", nfeatures = 2000)
+# Scale dataset
+dnMCAK_fn <- ScaleData(dnMCAK_fn, features = rownames(dnMCAK_fn))
+
+
+# Merge datasets, keeping the normalization and scaling on the data
+scRNA_norm_c <- merge(kif2b_fn, y = c(MCAK_fn, dnMCAK_fn), add.cell.ids = c("kif2b", "MCAK", "dnMCAK"), project = "BakhoumCIN2018", merge.data = TRUE)
+
+# Normalize, find variable features and scale the merged dataset
+scRNA_norm_cn <- NormalizeData(scRNA_norm_c, normalization.method = "LogNormalize")
+scRNA_norm_cn <- FindVariableFeatures(scRNA_norm_cn, selection.method = "vst", nfeatures = 2000)
+scRNA_norm_cn <- ScaleData(scRNA_norm_cn, features = rownames(scRNA_norm_cn))
+
+rm(scRNA_norm_c)
+rm(kif2b_f)
+rm(MCAK_f)
+rm(dnMCAK_f)
+
+```
+
+```{r}
+# Perform PCA
+scRNA_norm_cn <- RunPCA(scRNA_norm_cn, features = VariableFeatures(object = scRNA_norm_cn), npcs = 200)
+
+# Plot PCA results
+DimPlot(scRNA_norm_cn, reduction = "pca", group.by = "orig.ident")
+ElbowPlot(scRNA_norm_cn, ndims = 200)
+
+# Cluster the cells using the first 200 principal components.
+
+scRNA_norm_cn <- FindNeighbors(scRNA_norm_cn, dims = 1:200)
+scRNA_norm_cn <- FindClusters(scRNA_norm_cn, resolution = 0.5)
+
+scRNA_norm_cn <- StashIdent(scRNA_norm_cn, save.name = "clusterID")
+
+scRNA_norm_cn <- RunUMAP(scRNA_norm_cn, dims = 1:200)
+scRNA_norm_cn <- RunTSNE(scRNA_norm_cn, dims.use = 1:200, reduction.use = "pca", perplexity = 30)
+
+```
+
+```{r}
+# Inspect dataset, looking for batch effects
+VlnPlot(scRNA_norm_cn, features = c("nFeature_RNA", "nCount_RNA"), group.by = "orig.ident", ncol=2)
+
+# Plot PCA results
+DimPlot(scRNA_norm_cn, reduction = "pca", group.by = "orig.ident")
+
+DimPlot(scRNA_norm_cn, reduction = "umap", group.by = "clusterID")
+DimPlot(scRNA_norm_cn, reduction = "umap", group.by = "orig.ident")
+DimPlot(scRNA_norm_cn, reduction = "tsne", group.by = "clusterID")
+DimPlot(scRNA_norm_cn, reduction = "tsne", group.by = "orig.ident")
+
+```
+
+```{r}
+# Export Seurat object with processed individual datasets prior to merging, re-normalizing and scaling again
+if(export){
+saveRDS(scRNA_norm_cn, file = paste0(source.output.dir, "/Bakhoum_scRNA_norm_cn.rds"))
+  }
+
+scRNA_cn <- readRDS(file = paste0(source.output.dir, "/Bakhoum_scRNA_norm_cn.rds"))
+
+```
+
+# Seurat integration
+Try to correct for batch effects with Seurat integration 
+```{r}
+# Explore batch correction with Seurat integration workflow
+ob.list <- list(kif2b_fn, MCAK_fn, dnMCAK_fn)
+
+# ob.list <- lapply(list(kif2b_f, MCAK_f, dnMCAK_f), FUN = function(x){
+#   x <- NormalizeData(x)
+#   x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+# }
+# )
+
+features <- SelectIntegrationFeatures(object.list = ob.list)
+
+CINanchors <- FindIntegrationAnchors(object.list = ob.list, anchor.features = features)
+
+IntegratedCIN <- IntegrateData(anchorset = CINanchors)
+
+# Assign and inspect cell cycle scores
+IntegratedCIN <- CellCycleScoring(IntegratedCIN, s.features = s.genes, g2m.features = g2m.genes)
+
+```
+
+```{r}
+# specify that we will perform downstream analysis on the corrected data note that the original
+# unmodified data still resides in the 'RNA' assay
+DefaultAssay(IntegratedCIN) <- "integrated"
+
+# Run the standard workflow for visualization and clustering
+IntegratedCIN <- ScaleData(IntegratedCIN, verbose = FALSE)
+IntegratedCIN <- RunPCA(IntegratedCIN, npcs = 200, verbose = FALSE)
+IntegratedCIN <- RunUMAP(IntegratedCIN, reduction = "pca", dims = 1:200)
+IntegratedCIN <- RunTSNE(IntegratedCIN, reduction = "pca", dims = 1:200)
+IntegratedCIN <- FindNeighbors(IntegratedCIN, reduction = "pca", dims = 1:200)
+IntegratedCIN <- FindClusters(IntegratedCIN, resolution = 0.5)
+
+DimPlot(IntegratedCIN, reduction = "umap", group.by = "orig.ident")
+DimPlot(IntegratedCIN, reduction = "umap", group.by = "Phase")
+DimPlot(IntegratedCIN, reduction = "umap", split.by = "orig.ident")
+
+DimPlot(IntegratedCIN, reduction = "umap", label = TRUE, repel = TRUE)
+
+DimPlot(IntegratedCIN, reduction = "tsne", group.by = "orig.ident")
+DimPlot(IntegratedCIN, reduction = "tsne", group.by = "Phase")
+DimPlot(IntegratedCIN, reduction = "tsne", label = TRUE, repel = TRUE)
+
+```
+
+```{r}
+if(export){
+saveRDS(IntegratedCIN, file = paste0(source.output.dir, "/Bakhoum_integrated_scRNA.rds"))
+}
+
+IntegratedCIN <- readRDS(file = paste0(source.output.dir, "/Bakhoum_integrated_scRNA.rds"))
+```
+

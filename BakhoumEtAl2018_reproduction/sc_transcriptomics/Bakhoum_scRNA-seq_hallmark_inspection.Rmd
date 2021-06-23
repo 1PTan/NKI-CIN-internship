@@ -1,0 +1,198 @@
+---
+title: "Bakhoum et al 2018 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+#BiocManager::install("DropletUtils")
+# library(DropletUtils)
+# install.packages("Seurat")
+library(Seurat)
+# install.packages("patchwork")
+library(patchwork)
+# install.packages("ggrepel")
+library(ggrepel)
+# install.packages("sparseMatrixStats")
+library(sparseMatrixStats)
+#install.packages("msigdbr")
+library(msigdbr)
+# install.packages("tidyverse")
+library(tidyverse)
+# install.packages('pheatmap')
+library(pheatmap)
+
+select = dplyr::select
+rename = dplyr::rename
+```
+
+# Load msigdb hallmarks gene set
+```{r}
+all_gene_sets <- msigdbr("Homo sapiens")
+
+msigdb_hallmarks_set <- filter(all_gene_sets, gs_cat == "H") %>% select(gs_name, gene_symbol)
+
+msigdb_hallmarks_set <- split(msigdb_hallmarks_set$gene_symbol, msigdb_hallmarks_set$gs_name)
+
+msigdb_hallmarks_names <- read.csv2("data/names_hallmarks.csv")
+
+rm(all_gene_sets)
+# Another option is loading files with gene sets
+# msigdb_hallmarks <- gmtPathways("data/h.all.v7.4.symbols.gmt")
+# msigdb_hallmarks %>% head() %>% lapply(head)
+
+```
+
+## Inspect msigdb hallmark gene sets and overlaps
+```{r}
+# Set up empty data frame
+hallmark_gene_df <- setNames(data.frame(matrix(ncol = 2, nrow = 0)), c("gene", "pathway"))
+
+# Populate data frame with genes from each pathway
+for(i in 1:length(msigdb_hallmarks_set)){
+  hallmark_pathway = names(msigdb_hallmarks_set)[[i]]
+  print(paste(i, hallmark_pathway))
+  
+  hallmark_gene_df <- rbind(hallmark_gene_df, msigdb_hallmarks_set[[i]] %>% as.data.frame() %>% rename("gene" = ".") %>% mutate(pathway = hallmark_pathway))
+}
+
+# Make the dataframe wide with pathways as columns
+hallmark_gene_df_wide <- hallmark_gene_df %>% mutate(value = TRUE) %>% pivot_wider(values_from = value, names_from = pathway) %>% mutate_all(~replace(., is.na(.), FALSE))
+
+# vars.to.replace = colnames(hallmark_gene_df_wide)
+# Replace NA values with FALSE
+# hallmark_gene_df_wide[vars.to.replace][is.na(hallmark_gene_df_wide[vars.to.replace])] <- FALSE
+
+# number of genes in each pathway / pathways in each gene
+hallmark_gene_df_wide %>% column_to_rownames("gene") %>% colSums()
+# hallmark_gene_df_wide %>% column_to_rownames("gene") %>% rowSums()
+```
+
+```{r}
+# Inspect particular hallmark pathways
+hallmark_gene_df_wide %>% select(gene, HALLMARK_INFLAMMATORY_RESPONSE, HALLMARK_INTERFERON_ALPHA_RESPONSE, HALLMARK_INTERFERON_GAMMA_RESPONSE, HALLMARK_TGF_BETA_SIGNALING) %>% filter(HALLMARK_INFLAMMATORY_RESPONSE)
+
+# Calculate and inspect the Jaccard distance between pathways
+hallmark_jaccard_distances <- hallmark_gene_df_wide %>% column_to_rownames("gene") %>% proxy::dist(method = "Jaccard", by_rows = FALSE)
+
+hallmark_jaccard_distances <- hallmark_jaccard_distances %>% as.matrix() %>% as.data.frame()
+
+hallmark_jaccard_distances %>% summary()
+
+# hallmark_jaccard_distances %>% select(HALLMARK_INFLAMMATORY_RESPONSE, HALLMARK_INTERFERON_ALPHA_RESPONSE, HALLMARK_INTERFERON_GAMMA_RESPONSE, HALLMARK_TGF_BETA_SIGNALING) %>% view()
+
+```
+
+```{r}
+# Get genes shared between specific hallmarks
+sum(hallmark_gene_df_wide$HALLMARK_INFLAMMATORY_RESPONSE * hallmark_gene_df_wide$HALLMARK_INTERFERON_ALPHA_RESPONSE)
+
+INFR_EMT <- hallmark_gene_df_wide %>% column_to_rownames("gene") %>% filter(HALLMARK_INFLAMMATORY_RESPONSE * HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION == 1) %>% rownames()
+INFR_EMT
+
+INFR_IFNa <- hallmark_gene_df_wide %>% column_to_rownames("gene") %>% filter(HALLMARK_INFLAMMATORY_RESPONSE * HALLMARK_INTERFERON_ALPHA_RESPONSE == 1) %>% rownames()
+INFR_IFNa
+
+INFR_IFNy <- hallmark_gene_df_wide %>% column_to_rownames("gene") %>% filter(HALLMARK_INFLAMMATORY_RESPONSE * HALLMARK_INTERFERON_GAMMA_RESPONSE == 1) %>% rownames()
+INFR_IFNy
+
+INFR_TGFB <- hallmark_gene_df_wide %>% column_to_rownames("gene") %>% filter(HALLMARK_INFLAMMATORY_RESPONSE * HALLMARK_TGF_BETA_SIGNALING == 1) %>% rownames()
+INFR_TGFB
+
+IFNa_IFNy <- hallmark_gene_df_wide %>% column_to_rownames("gene") %>% filter(HALLMARK_INTERFERON_ALPHA_RESPONSE * HALLMARK_INTERFERON_GAMMA_RESPONSE == 1) %>% rownames()
+IFNa_IFNy
+```
+
+## Compare inflammation gene set with supplementary table 5g
+```{r}
+# msigdb_hallmarks_set$HALLMARK_INFLAMMATORY_RESPONSE
+
+# msigdb_hallmarks_set$HALLMARK_TNFA_SIGNALING_VIA_NFKB
+
+inflammation_set <- read.csv2("data/s5g.csv")
+
+sum(msigdb_hallmarks_set$HALLMARK_INFLAMMATORY_RESPONSE %in% inflammation_set$Supplementary.Table.5g..Inflammation.genes)
+
+# hallmark genes not in supp. table 5g
+msigdb_hallmarks_set$HALLMARK_INFLAMMATORY_RESPONSE[!msigdb_hallmarks_set$HALLMARK_INFLAMMATORY_RESPONSE %in% inflammation_set$Supplementary.Table.5g..Inflammation.genes]
+```
+
+# Inspect which genes are present in Bulk and scRNA
+```{r}
+length(msigdb_hallmarks_set)
+
+df.counts.raw <- read.csv("data/GSE98183_Counts.geneSymbols.75bpPE.csv")
+scRNA_c <- readRDS(file = "data/scRNA_c.rds")
+
+scRNA_c
+```
+
+```{r}
+mat_counts <- Seurat::GetAssayData(scRNA_c, assay = "RNA", slot = "counts")
+mat_counts_f <- mat_counts[rowMeans(mat_counts) > 0,]
+
+df.counts.raw <- df.counts.raw %>% column_to_rownames("X")
+
+df.counts.f <- df.counts.raw[rowMeans(df.counts.raw)>0, ] %>% rownames_to_column("gene")
+
+sc_genes <- rownames(mat_counts_f)
+bulk_genes <- df.counts.f$gene
+
+# Number of genes
+length(sc_genes)
+length(bulk_genes)
+
+# Number of genes with the same symbol
+sum(sc_genes %in% bulk_genes)
+sum(bulk_genes %in% sc_genes)
+```
+```{r}
+msigdb_hallmarks_set[1]
+# c(1:length(msigdb_hallmarks_set))
+
+# Set up empty data frame
+hallmark_gene_presence <- setNames(data.frame(matrix(ncol = 4, nrow = 0)), c("pathway", "size", "bulk", "single_cell"))
+
+
+for (i in c(1:length(msigdb_hallmarks_set))){
+  print(names(msigdb_hallmarks_set)[i])
+  df <- data.frame("pathway" = names(msigdb_hallmarks_set)[i], 
+                   "size" = length(msigdb_hallmarks_set[[1]]),
+                   "bulk" = sum(msigdb_hallmarks_set[[i]] %in% bulk_genes),
+                   "single_cell" = sum(msigdb_hallmarks_set[[i]] %in% sc_genes))
+  hallmark_gene_presence <- rbind(hallmark_gene_presence, df)
+  rm(df)
+}
+```
+
+
+```{r}
+hallmark_gene_presence %>% left_join(msigdb_hallmarks_names) %>% pivot_longer(cols = c(bulk, single_cell), values_to = "count", names_to = "dataset") %>% mutate(prop = count/size) %>% ggplot(aes(x = name, y = prop, fill = dataset)) + geom_col(position = "dodge") + coord_flip() + labs(x = "", y = "Proportion found in genes with mean > 0")
+
+# ggsave("data/hallmark_presence.png", width=6, height=8, dpi=300)
+
+```
+
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+# packageVersion("DESeq2")
+# packinfo <- installed.packages(fields = c("Package", "Version"))
+# packinfo[,c("Package", "Version")]
+# packinfo["graphics",c("Package", "Version")]
+
+```
+
+
+

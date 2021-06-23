@@ -15,37 +15,26 @@ knitr::opts_chunk$set(
 )
 
 # install.packages("BiocManager") #(only if you do not have BiocManager)
-#BiocManager::install("DropletUtils")
-# library(DropletUtils)
-# install.packages("Seurat")
+#BiocManager::install("fgsea", "GO.db", "GOstats", "org.Hs.eg.db")
+
+# install.packages("Seurat", "patchwork", "ggrepel", "sparseMatrixStats", "msigdbr", "tidyverse", "proxy", "plotly", "pheatmap", "gplots")
+
 library(Seurat)
-# install.packages("patchwork")
 library(patchwork)
-# install.packages("ggrepel")
 library(ggrepel)
-# install.packages("sparseMatrixStats")
 library(sparseMatrixStats)
-#install.packages("msigdbr")
 library(msigdbr)
-# BiocManager::install("GO.db")
 library(GO.db)
-# BiocManager::install("GOstats")
 library(GOstats)
-# BiocManager::install("org.Hs.eg.db")
 library(org.Hs.eg.db)
-# install.packages("tidyverse")
 library(tidyverse)
-# install.packages("proxy")
 library(proxy)
-# BiocManager::install("fgsea")
 library(fgsea)
-# install.packages('plotly')
 library(plotly)
-# install.packages('pheatmap')
 library(pheatmap)
-# install.packages("gplots")
 library(gplots)
 
+set.seed(42)
 select = dplyr::select
 rename = dplyr::rename
 ```
@@ -77,7 +66,7 @@ cluster.DE <- read.csv2(paste0(source.output.dir, "/Bakhoum_scRNA_cluster_marker
 CIN.DE <- read.csv2(paste0(source.output.dir, "/Bakhoum_scRNA_CIN_cluster_markers.csv"))
 
 ```
-## Normalize and scale
+# Normalize and scale
 ```{r}
 # median_library_size <- scRNA_c@assays$RNA %>% colSums() %>% median()
 
@@ -98,7 +87,7 @@ CIN.DE <- read.csv2(paste0(source.output.dir, "/Bakhoum_scRNA_CIN_cluster_marker
 # rm(scRNA_c)
 ```
 
-## Perform PCA
+# Perform PCA
 ```{r}
 # Perform PCA
 # scRNA_cn <- RunPCA(scRNA_cn, features = VariableFeatures(object = scRNA_cn), npcs = 200)
@@ -163,7 +152,7 @@ rm(pca)
 JackStrawPlot(scRNA_cn, dims = 1:50)
 # 1:50
 ```
-## Cell cycle assignment
+# Cell cycle assignment
 ```{r}
 # A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can
 # segregate this list into markers of G2/M phase and markers of S phase
@@ -177,11 +166,11 @@ scRNA_cn[[]] %>% select(S.Score, G2M.Score, Phase) %>% mutate_if(is.character, a
 
 Idents(scRNA_cn) <- "Phase"
 RidgePlot(scRNA_cn, features = c("PCNA", "TOP2A", "MCM6", "MKI67"), ncol = 2)
-Idents(scRNA_cn) <- "orig.ident"
-RidgePlot(scRNA_cn, features = c("PCNA", "TOP2A", "MCM6", "MKI67"), ncol = 2)
+# Idents(scRNA_cn) <- "orig.ident"
+# RidgePlot(scRNA_cn, features = c("PCNA", "TOP2A", "MCM6", "MKI67"), ncol = 2)
 
 ```
-## Run UMAP and TSNE
+# Run UMAP and TSNE
 ```{r}
 # Dimensionality reduction with UMAP on variable features instead of PCs
 # scRNA_cn <- RunUMAP(scRNA_cn, reduction.use = NULL, features = VariableFeatures(scRNA_cn))
@@ -201,7 +190,7 @@ RidgePlot(scRNA_cn, features = c("PCNA", "TOP2A", "MCM6", "MKI67"), ncol = 2)
 # scRNA_cn <- RunTSNE(scRNA_cn, dims.use = 1:200, reduction.use = "pca", perplexity = 30)
 
 ```
-## Clustering cells
+# Clustering cells
 ```{r}
 # scRNA_cn <- FindNeighbors(scRNA_cn, features = VariableFeatures(object = scRNA_cn))
 # scRNA_cn <- FindClusters(scRNA_cn, resolution = 0.5)
@@ -214,32 +203,18 @@ Idents(scRNA_cn) <- "clusterID"
 
 table(scRNA_cn$orig.ident)
 table(scRNA_cn$clusterID)
-prop.table(table(scRNA_cn$clusterID))
-prop.table(table(scRNA_cn$clusterID, scRNA_cn$orig.ident), margin = 2)
-prop.table(table(scRNA_cn$orig.ident, scRNA_cn$clusterID), margin = 2)
 
 prop.table(table(scRNA_cn$CIN_status))
-prop.table(table(scRNA_cn$clusterID, scRNA_cn$CIN_status), margin = 2)
-prop.table(table(scRNA_cn$CIN_status, scRNA_cn$clusterID), margin = 2)
 prop.table(table(scRNA_cn$Phase, scRNA_cn$CIN_status), margin = 2)
+
+prop.table(table(scRNA_cn$clusterID, scRNA_cn$orig.ident), margin = 2)
+prop.table(table(scRNA_cn$orig.ident, scRNA_cn$clusterID), margin = 2)
 
 table(scRNA_cn$clusterID, scRNA_cn$CIN_status) %>% as.data.frame() %>% rename("clusterID" = Var1, "group" = Var2) %>% ggplot(aes(x = clusterID, y = group, fill = Freq)) + geom_tile() + scale_fill_distiller(palette = "PuBu") + geom_text(aes(label=Freq)) + labs(y = "", fill = "Number of cells")
 
 ```
 
-```{r}
-prop.table(table(scRNA_cn$Phase, scRNA_cn$clusterID), margin = 2)
-
-cluster_assignment <- prop.table(table(scRNA_cn$CIN_status, scRNA_cn$clusterID), margin = 2) %>% as.data.frame() %>% rename("CIN_status" = Var1, "cluster" = Var2)
-
-cluster_assignment$CIN_status <- gsub("-", "_", cluster_assignment$CIN_status)
-
-cluster_assignment <- cluster_assignment %>% pivot_wider(values_from = Freq, names_from = CIN_status) %>% mutate(CIN_status = ifelse(CIN_high < 0.15, "CIN-low", "CIN-high"))
-
-cluster_assignment
-```
-
-## Visualization
+# Visualization
 ```{r}
 DimPlot(scRNA_cn, reduction = "UMAP_features", group.by = "CIN_status")
 DimPlot(scRNA_cn, reduction = "UMAP_features", group.by = "orig.ident")
@@ -257,8 +232,7 @@ DimPlot(scRNA_cn, reduction = "tsne", group.by = "Phase")
 DimPlot(scRNA_cn, reduction = "tsne", group.by = "clusterID")
 
 ```
-
-## 3D UMAP
+# 3D UMAP
 ```{r}
 # Extract cell embedding information from Seurat Object
 # umap_1 <- scRNA_cn[["umap3d"]]@cell.embeddings[,1]
@@ -302,76 +276,10 @@ fig <- plot_ly(data = plot.data,
 
 fig
 
-# Before you plot, set the ranges of the axis you desire. This set axis range will be 
-# present across all clusters, and plotly will not adjust for axis length anymore
-# this axis length will persist even when selecting some clusters
-
-# xaxis
-# axx <- list(nticks = 4,  range = c(-10,10))
-
-# yaxis
-# axy <- list(nticks = 4, range = c(-10,10))
-
-#zaxis
-# axz <- list(nticks = 4, range = c(-10,10))
-
-
-# fig <- fig %>% layout(scene = list(xaxis=axx,yaxis=axy,zaxis=axz))
-# fig_cube <- fig %>% layout(scene = list(xaxis=axx,yaxis=axy,zaxis=axz, aspectmode='cube')) # To maintain cubic aspect
-
 rm(plot.data)
 ```
 
-
-```{r}
-# Say you wanto make a gene-expression 3D plot, where you can plot gene expression against a color scale
-# Here using the same seurat object as above, we extract gene expression information for beta-actin 'ACTB'
-# Here we concentrate on SCT normalized data, or log normalized RNA NOT raw counts.
-# In addition if you want, you may look at normalised-RNA, SCT or integrated slots, to look at gene expression
-# Setting your DefaultAssay() will inform R which assay to pick up expression data from.
-
-# DefaultAssay(object = yourseuratobject)
-# DefaultAssay(object = yourseuratobject) <- "RNA"
-# DefaultAssay(object = yourseuratobject) <- "integrated"
-# DefaultAssay(object = yourseuratobject) <- "SCT"
-
-# create a dataframe
-# plot.data <- FetchData(object = yourseuratobject, vars = c("UMAP_1", "UMAP_2", "UMAP_3", "ACTB"), slot = 'data')
-
-# Say you want change the scale, so that every cell having an expression >1 will be one color
-# Basically, you are re-adjusting the scale here, so that any cell having a certain expression will light up on your 3D plot
-
-# First make another column in your dataframe, where all values above 1 are re-assigned a value of 1
-# This information is stored in the 'changed' column of your dataframe
-
-# plot.data$changed <- ifelse(test = plot.data$ACTB <1, yes = plot.data$ACTB, no = 1)
-
-# Add the label column, so that now the column has 'cellname-its expression value'
-
-# plot.data$label <- paste(rownames(plot.data)," - ", plot.data$ACTB, sep="")
-
-# Plot your data, in this example my Seurat object had 21 clusters (0-20), and cells express a gene called ACTB
-
-# you can just run this against the column for the gene as well using ~ACTB, the algorith will automatically scale in that case based on maximal and minimal values
-# plot_ly(data = plot.data, 
-#         x = ~UMAP_1, y = ~UMAP_2, z = ~UMAP_3, 
-#         color = ~changed, 
-#         opacity = .5,
-#         colors = c('darkgreen', 'red'), 
-#         type = "scatter3d", 
-#         mode = "markers",
-#         marker = list(size = 5, width=2), 
-#         text=~label,
-#         hoverinfo="text"
-# )
-
-# On running this code the HTML output should appear in RStudio. You can save the output as a
-# HTML file. Once you have saved, just open the HTML file in any web browser (double click on the html- file
-# and if asked select to open with any web browser like google chrome/safari/mozilla/explorer etc).
-# It should be have all of the integrated features you saw in the RStudio output file.
-```
-
-## Cluster markers
+# Cluster markers
 ```{r} 
 # Find cluster markers 
 Idents(scRNA_cn) <- "clusterID"
@@ -384,56 +292,30 @@ Idents(scRNA_cn) <- "clusterID"
 
 # DoHeatmap(scRNA_cn, features = clustertop10$gene) + NoLegend()
 ```
-## Plotting signatures
+
+# Plotting signatures
 ```{r}
 # Plotting EMT signature # Supp table 5f
-EMT_signature <- c("VIM", "ZEB2", "SNAI2", "ZEB1")
+EMT_signature <- c("EZH", "JUN", "VIM", "STEAP1", "SOX4", "MMP14", "SHH", "TIMP1", "ZEB1", "ZEB2", "SNAI2")
 
-Idents(scRNA_cn) <- "CIN_status"
-VlnPlot(scRNA_cn, features = EMT_signature)
-
-Idents(scRNA_cn) <- "clusterID"
-VlnPlot(scRNA_cn, features = EMT_signature)
-
-# Plotting EMT signature from Figure 4a 
-EMT_signature2 <- c("EZH", "JUN", "VIM", "STEAP1", "SOX4", "MMP14", "SHH", "TIMP1", "ZEB1")
-
-EMT_signature2 <- EMT_signature2[EMT_signature2 %in% rownames(scRNA_cn@assays$RNA)]
-
-Idents(scRNA_cn) <- "CIN_status"
-for(i in 1:length(EMT_signature2)){
-p <- VlnPlot(scRNA_cn, features = EMT_signature2[i])
-print(p)
-}
-
-EMT_diff <- c("VIM", "STEAP1", "SOX4", "MMP14", "ZEB1")
+EMT_signature <- EMT_signature[EMT_signature %in% rownames(scRNA_cn@assays$RNA)]
 
 Idents(scRNA_cn) <- "clusterID"
-for(i in 1:length(EMT_diff)){
-p <- VlnPlot(scRNA_cn, features = EMT_diff[i])
+for(i in 1:length(EMT_signature)){
+p <- VlnPlot(scRNA_cn, features = EMT_signature[i])
 print(p)
 }
-
 ```
-
 ```{r}
 # Plotting Genes enriched in the "M" Population from Bakhoum et al Extended figure 6b 
-M_markers = c("ITGB5", "ITGB1", "ITGA5", "ITGA10", "IGFBP4", "FN1", "DSC2", "CXCL1","CTNNB1", "BMP4", "BCL2L1")
+M_markers = c("ITGB5", "ITGB1", "ITGA5", "ITGA10", "IGFBP4", "FN1", "DSC2", "CXCL1","CTNNB1", "BMP4", "BCL2L1", "VIM", "TIMP1", "TGFBR2", "TGFBI", "TGFB1", "PPARG", "NUPR1", "MSN", "LMCD1", "LEF1", "JAG1")
 
-Idents(scRNA_cn) <- "CIN_status"
+M_markers <- M_markers[M_markers %in% rownames(scRNA_cn@assays$RNA)]
+
+Idents(scRNA_cn) <- "clusterID"
 for(i in 1:length(M_markers)){
 p <- VlnPlot(scRNA_cn, features = M_markers[i])
 print(p)
-}
-
-M_diff <- c("ITGB1", "IGFBP4", "BCL2L1")
-
-Idents(scRNA_cn) <- "clusterID"
-for(i in 1:length(M_diff)){
-p <- VlnPlot(scRNA_cn, features = M_diff[i])
-print(p)
-# p <- FeaturePlot(scRNA_cn, features = M_markers[i])
-# print(p)
 }
 ```
 
@@ -441,108 +323,17 @@ print(p)
 # Plot CIN signature from Bakhoum et al 2018 (Supp. table 5), comparing CIN high and CIN low in bulk data
 CIN_signature <- c('PELI2','BMP2','SHH','TNS4','RAB3B','ROBO1','ARHGAP28','CHN2','CST1','F13A1','CPVL','SEMA6D','NHSL2','GTF2IP7','DPYSL3','PCDH7','KHDRBS3','TRAC','TMEM156', 'CST4','CD24','FGF5','NTN4')
 
-CIN_present <- CIN_signature %in% rownames(scRNA_cn@assays$RNA)
+CIN_signature <- CIN_signature[CIN_signature %in% rownames(scRNA_cn@assays$RNA)]
 
-Idents(scRNA_cn) <- "CIN_status"
-
-for(i in 1:length(CIN_present)){
-p <- VlnPlot(scRNA_cn, features = CIN_signature[CIN_present][i])
+Idents(scRNA_cn) <- "clusterID"
+for(i in 1:length(CIN_signature)){
+p <- VlnPlot(scRNA_cn, features = CIN_signature[i])
 print(p)
 }
 
 ```
 
-## CIN DE
-```{r}
-# Plot gene expression of CIN high x low cells
-Idents(scRNA_cn) <- "CIN_status"
-
-# Subset data
-CIN_high <- subset(scRNA_cn, idents = "CIN-high")
-CIN_low <- subset(scRNA_cn, idents = "CIN-low")
-
-# Calculate average gene expression for CIN high and low cells
-avg.CINhigh.cells <- as.data.frame(AverageExpression(CIN_high, verbose = FALSE)$RNA) %>% rename("CIN_high" = all) %>% rownames_to_column("gene")
-
-avg.CINlow.cells <- as.data.frame(AverageExpression(CIN_low, verbose = FALSE)$RNA) %>% rename("CIN_low" = all) %>% rownames_to_column("gene")
-
-
-# Plot CIN high x cin low pseudocounts in log space
-avg.CINhigh.cells %>% full_join(avg.CINlow.cells, by = "gene") %>% ggplot(aes(x = CIN_low, y = CIN_high)) + geom_point() + scale_y_continuous(trans = "log1p") + scale_x_continuous(trans = "log1p")
-
-# avg.CINhigh.cells %>% full_join(avg.CINlow.cells, by = "gene") %>% mutate(fc = (CIN_high + 1)/(CIN_low + 1), log2fc = log2(fc)) %>% filter(gene %in% c("LAPTM5", "MARCKSL1", "HLA-B"))
-
-```
-
-```{r}
-# Find CIN-high markers based on DE 
-Idents(scRNA_cn) <- "CIN_status"
-
-# obs Try using min.pct lower, 
-# ?FindMarkers 
-
-# CIN.DE <- FindMarkers(scRNA_cn, ident.1 = "CIN-high", min.pct = 0.05, logfc.threshold = 0) %>% rownames_to_column("gene")
-
-CIN.top <- CIN.DE %>% top_n(n = 25, wt = avg_log2FC)
-
-DoHeatmap(scRNA_cn, features = CIN.top$gene)
-```
-
-## Use only subpopulation M
-```{r}
-# cluster.M <- FindMarkers(scRNA_cn, ident.1 = c(3,4), min.pct = 0.05, logfc.threshold = 0) %>% rownames_to_column("gene") %>% mutate(cluster = "3,4")
-
-# cluster.M %>% write.csv2(file = paste0(source.output.dir, "/scRNA_clusterM.csv"), row.names = FALSE)
-
-cluster.M <- read.csv2(file = paste0(source.output.dir, "/scRNA_clusterM.csv"))
-```
-
-```{r}
-# Compare with Bakhoum CIN gene signature
-CIN_signature_df <- CIN_signature %>% as.data.frame() %>% rename('gene' = ".") %>% mutate(Bakhoum_gene_sig = TRUE)
-
-CIN.DE %>% left_join(CIN_signature_df) %>% filter(Bakhoum_gene_sig)
-#CIN.cluster.markers %>% filter(str_detect(gene, "BMP2"))
-```
-
-
-```{r}
-# Plot gene expression of CIN high x low cells, labeling DE genes
-DE_comp <- avg.CINhigh.cells %>% full_join(avg.CINlow.cells, by = "gene") %>% left_join(
-  CIN.DE %>% mutate(CIN_DE = TRUE, label = p_val_adj < 1e-260)  %>% select(gene, CIN_DE, label)
-)
-
-DE_comp %>% ggplot(aes(x = CIN_low, y = CIN_high, col = CIN_DE)) + geom_point() +
-  geom_text_repel(
-  aes(x = CIN_low, y = CIN_high, label = gene), data = DE_comp %>% filter(label), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
-  ) + theme(legend.position = "none") + scale_y_continuous(trans = "log1p") + scale_x_continuous(trans = "log1p")
-
-rm(DE_comp)
-rm(avg.CINhigh.cells)
-rm(avg.CINlow.cells)
-rm(CIN_high)
-rm(CIN_low)
-
-```
-
-## Compare with Bulk CIN DE - gene correlation
-```{r}
-CIN.DE.bulk <- read_csv2("data/bulk_transcriptomics_deseq.csv")
-
-CIN.DE.c <- CIN.DE.bulk %>% inner_join(CIN.DE %>% rename("symbol" = gene)) %>% mutate(bulk_sign = sign(log2FoldChange), sc_sign = sign(avg_log2FC))
-
-CIN.DE.c %>% ggplot(aes(x = log2FoldChange, y = avg_log2FC)) + geom_point(alpha = 0.3, col = "blue") + geom_abline(slope = 1, col = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low Log2FC", x = "Bulk transcriptomics", y = "scRNA-seq transcriptomics") + geom_text_repel(
-  aes(x = log2FoldChange, y = avg_log2FC, label = symbol), data = CIN.DE.c %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
-  )
-
-cor(CIN.DE.c$log2FoldChange, CIN.DE.c$avg_log2FC)
-
-# Check agreement between the sign of genes
-table(sign(CIN.DE.c$log2FoldChange), sign(CIN.DE.c$avg_log2FC))
-prop.table(table(sign(CIN.DE.c$log2FoldChange), sign(CIN.DE.c$avg_log2FC)))
-
-```
-## Export
+# Export
 ```{r}
 if(export){
 saveRDS(scRNA_cn, file = paste0(source.output.dir, "/Bakhoum_scRNA.rds"))
@@ -570,241 +361,70 @@ CIN.DE %>% select(gene, avg_log2FC) %>% rename("NAME" = gene) %>% write.table(fi
 
 ```
 
-## Load msigdb hallmarks gene set
+# Load msigdb hallmarks gene set
 ```{r}
-all_gene_sets <- msigdbr("Homo sapiens")
+# all_gene_sets <- msigdbr("Homo sapiens")
 
-msigdb_hallmarks_set <- filter(all_gene_sets, gs_cat == "H") %>% select(gs_name, gene_symbol)
+# msigdb_hallmarks_set <- filter(all_gene_sets, gs_cat == "H") %>% select(gs_name, gene_symbol)
 
-msigdb_hallmarks_set <- split(msigdb_hallmarks_set$gene_symbol, msigdb_hallmarks_set$gs_name)
+# msigdb_hallmarks_set <- split(msigdb_hallmarks_set$gene_symbol, msigdb_hallmarks_set$gs_name)
 
 msigdb_hallmarks_names <- read.csv2("data/names_hallmarks.csv")
 
-rm(all_gene_sets)
+# rm(all_gene_sets)
 # Another option is loading files with gene sets
 # msigdb_hallmarks <- gmtPathways("data/h.all.v7.4.symbols.gmt")
 # msigdb_hallmarks %>% head() %>% lapply(head)
 
 ```
 
-## CIN High x CIN Low
-## FGSEA
+# Clustering cells on EMT genes
 ```{r}
-CIN_fc_rnk <- CIN.DE %>% select(gene, avg_log2FC) %>% deframe()
-
-fgseaRes <- read.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_CIN_highlow.csv"))
-
-# fgseaRes <- fgsea(pathways = msigdb_hallmarks_set, 
-#                   stats    = CIN_fc_rnk,
-#                   minSize  = 15,
-#                   maxSize  = 500)
-# 
-# fgseaRes <- fgseaRes %>% mutate(within_threshold = pval < 0.05, "Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low")) %>% left_join(msigdb_hallmarks_names)
-
-plotEnrichment(msigdb_hallmarks_set[["HALLMARK_KRAS_SIGNALING_UP"]],
-               CIN_fc_rnk) + labs(title="KRAS Signaling")
-
-plotEnrichment(msigdb_hallmarks_set[["HALLMARK_INFLAMMATORY_RESPONSE"]],
-               CIN_fc_rnk) + labs(title="Inflammatory Response")
-
-#fgseaRes %>% select(-leadingEdge) %>% write.csv2("data/fgsea_cin_high_low.csv")
-
-fgseaRes %>% mutate(pval = ifelse(pval < 0.0001, 0.000101, pval)) %>% ggplot(aes(x = log10(pval), y = NES)) +
-  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
-  geom_hline(yintercept = 0, col = "black") +
-  geom_text_repel(
-  aes(x = log10(pval), y = NES, label = name), data = fgseaRes %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
-  ) +
-  labs(x = "log10(pval)", y = "Normalized Enrichment Score", col = "Enriched in") + 
-  scale_y_continuous(limits = c(-2,2), breaks = seq(-2,2,1)) + 
-  scale_x_continuous(trans = "reverse", limits = c(0, -4), breaks = c(-4, -3, -2, -1, 0) , labels = c("<0.0001", "0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
-
-if (export){
-# png(filename="data/fGSEA_scRNA_results_fc.png", width=800, height=500)
-ggsave(file = paste0(source.output.dir, "/fGSEA_scRNA_results_fc.png"), width=8, height=5, dpi=300)
-  
-    fgseaRes %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_CIN_highlow.csv"), row.names = FALSE)
-
-}
-```
-
-## GSEA
-```{r}
-# GSEA results
-GSEA_pos <- read.table("data/scRNA_cinhighlow_hallmarks_fc.GseaPreranked.1619184220473/gsea_report_for_na_pos_1619184220473.tsv", header = TRUE, sep = "\t")
-
-GSEA_neg <- read.table("data/scRNA_cinhighlow_hallmarks_fc.GseaPreranked.1619184220473/gsea_report_for_na_neg_1619184220473.tsv", header = TRUE, sep = "\t")
-
-GSEA_res <- rbind(GSEA_pos, GSEA_neg) %>% mutate(within_threshold = FDR.q.val < 0.3) %>% mutate("Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low")) %>% left_join(msigdb_hallmarks_names %>% dplyr::rename("NAME" = pathway))
-
-GSEA_res %>% mutate(pval = ifelse(FDR.q.val < 0.001, 0.00101, FDR.q.val)) %>% 
-  ggplot(aes(x = log10(FDR.q.val), y = NES)) +
-  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
-  geom_hline(yintercept = 0, col = "black") +
-  geom_text_repel(
-  aes(x = log10(FDR.q.val), y = NES, label = name), data = GSEA_res %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
-  ) +
-  labs(x = "log10(FDRq)", y = "Normalized Enrichment Score", col = "Enriched in") + 
-  scale_y_continuous(limits = c(-2,2), breaks = seq(-2,2,1)) + 
-  scale_x_continuous(trans = "reverse", limits = c(0, -3), breaks = c(-3, -2, -1, 0) , labels = c("<0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
-
-if (export){
-# png(filename="data/GSEA_scRNA_results_fc.png", width=800, height=500)
-ggsave(file = paste0(source.output.dir, "/GSEA_scRNA_results_fc.png"), width=8, height=5, dpi=300)
-}
-
-
-# GSEA_pos <- read.table("data/scRNA_cinhighlow_hallmarks_pval.GseaPreranked.1619184161366/gsea_report_for_na_pos_1619184161366.tsv", header = TRUE, sep = "\t")
-# 
-# GSEA_neg <- read.table("data/scRNA_cinhighlow_hallmarks_pval.GseaPreranked.1619184161366/gsea_report_for_na_neg_1619184161366.tsv", header = TRUE, sep = "\t")
-# 
-# GSEA_res <- rbind(GSEA_pos, GSEA_neg) %>% mutate(within_threshold = FDR.q.val < 0.3) %>% mutate("Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low"))  %>% left_join(msigdb_hallmarks_names %>% dplyr::rename("NAME" = pathway))
-# 
-# GSEA_res %>% mutate(pval = ifelse(FDR.q.val < 0.001, 0.00101, FDR.q.val)) %>% 
-#   ggplot(aes(x = log10(FDR.q.val), y = NES)) +
-#   geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
-#   geom_hline(yintercept = 0, col = "black") +
-#   geom_text_repel(
-#   aes(x = log10(FDR.q.val), y = NES, label = name), data = GSEA_res %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
-#   ) +
-#   labs(x = "log10(FDRq)", y = "Normalized Enrichment Score", col = "Enriched in") + 
-#   scale_y_continuous(limits = c(-2,2), breaks = seq(-2,2,1)) + 
-#   scale_x_continuous(trans = "reverse", limits = c(0, -3), breaks = c(-3, -2, -1, 0) , labels = c("<0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
-# 
-# if (export){
-# ggsave(file = paste0(source.output.dir, "/GSEA_scRNA_results_pval.png"), width=8, height=5, dpi=300)
-# }
-
-rm(GSEA_pos)
-rm(GSEA_neg)
-
-```
-
-## Compare with Bulk GSEA NES
-```{r}
-Bulk_gsea <- read.csv2("data/Supp_table6.csv")
-
-# GSEA x Bulk
-GSEA_comp <- Bulk_gsea %>% select(NAME, NES, FDR.q.val) %>% rename(BULK_NES = NES, BULK_FDR.q.val = FDR.q.val) %>% left_join(
-  GSEA_res %>% select(NAME, NES, FDR.q.val) %>% rename(scNES = NES, scFDR.q.val = FDR.q.val) 
-) %>% left_join(
-  msigdb_hallmarks_names %>% rename(NAME = pathway)
-  ) %>% mutate(sign_agreement = sign(BULK_NES) == sign(scNES))
-
-GSEA_comp %>% ggplot(aes(x = BULK_NES, y = scNES, col = scFDR.q.val)) + 
-  geom_point() + geom_abline(slope = 1) + 
-  geom_text_repel(
-    aes(x = BULK_NES, y = scNES, label = name), data = GSEA_comp %>% filter(!sign_agreement), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
-  ) + labs(x = "Bulk GSEA NES", y = "scRNA GSEA NES")
-
-# FGSEA x Bulk
-fGSEA_comp <- Bulk_gsea %>% select(NAME, NES, FDR.q.val) %>% rename(BULK_NES = NES, BULK_FDR.q.val = FDR.q.val) %>% left_join(
-  fgseaRes %>% select(pathway, NES, pval) %>% rename(NAME = pathway, scNES = NES, scpval = pval) 
-) %>% left_join(
-  msigdb_hallmarks_names %>% rename(NAME = pathway)
-  ) %>% mutate(sign_agreement = sign(BULK_NES) == sign(scNES))
-
-fGSEA_comp %>% ggplot(aes(x = BULK_NES, y = scNES, col = log(scpval))) + 
-  geom_point() + geom_abline(slope = 1) + 
-  geom_text_repel(
-    aes(x = BULK_NES, y = scNES, label = name), data = GSEA_comp %>% filter(!sign_agreement), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
-  ) + labs(x = "Bulk GSEA NES", y = "scRNA fGSEA NES")
-
-```
-
-## Population "M" FGSEA
-```{r}
-M_rnk <- cluster.M %>% select(gene, avg_log2FC) %>% deframe()
-
-M_fgseaRes <- read.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_M.csv"))
-
-
-# M_fgseaRes <- fgsea(pathways = msigdb_hallmarks_set, 
-#                   stats    = M_rnk,
-#                   minSize  = 15,
-#                   maxSize  = 500)
-# 
-# M_fgseaRes <- M_fgseaRes %>% mutate(within_threshold = pval < 0.01, "Enriched_in" = ifelse(NES > 0, "Cluster 3,4", "Other clusters")) %>% left_join(msigdb_hallmarks_names)
-
-plotEnrichment(msigdb_hallmarks_set[["HALLMARK_KRAS_SIGNALING_UP"]], M_rnk) + labs(title="KRAS Signaling")
-
-plotEnrichment(msigdb_hallmarks_set[["HALLMARK_INFLAMMATORY_RESPONSE"]], M_rnk) + labs(title="Inflammatory Response")
-
-plotEnrichment(msigdb_hallmarks_set[["HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION"]], M_rnk) + labs(title="EMT")
-
-#fgseaRes %>% select(-leadingEdge) %>% write.csv2("data/fgsea_cin_high_low.csv")
-
-M_fgseaRes %>% mutate(pval = ifelse(pval < 0.00001, 0.0000101, pval)) %>% ggplot(aes(x = log10(pval), y = NES)) +
-  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
-  geom_hline(yintercept = 0, col = "black") +
-  geom_text_repel(
-  aes(x = log10(pval), y = NES, label = name), data = M_fgseaRes %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 30
-  ) +
-  labs(x = "log10(pval)", y = "Normalized Enrichment Score", col = "Enriched in") + 
-  scale_y_continuous(limits = c(-2,2), breaks = seq(-2,2,1)) + 
-  scale_x_continuous(trans = "reverse", limits = c(0, -5), breaks = c(-5, -4, -3, -2, -1, 0) , labels = c("<0.00001", "0.0001", "0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
-
-# topPathways <- c(fgseaRes[ES > 0][head(order(pval), n=5), pathway],
-#                  rev(fgseaRes[ES < 0][head(order(pval), n=5), pathway]))
-# 
-# plotGseaTable(msigdb_hallmarks_set[topPathways], CIN_fc_rnk, fgseaRes, gseaParam=0.5, render = TRUE)
-
-if(export){
-  M_fgseaRes %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_M.csv"), row.names = FALSE)
-}
-
-```
-
-## Label hallmarks
-```{r}
-# Label genes from the inflammatory response
-CIN.DE.c %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_INFLAMMATORY_RESPONSE) %>% ggplot(aes(x = log2FoldChange, y = avg_log2FC)) + geom_point(alpha = 0.3, col = "blue") + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low Log2FC Inflammatory response", x = "Bulk transcriptomics", y = "scRNA-seq transcriptomics") + geom_text_repel(
-  aes(x = log2FoldChange, y = avg_log2FC, label = symbol), data = CIN.DE.c %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_INFLAMMATORY_RESPONSE), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
-  )
-
-# Label genes from the EMT
-CIN.DE.c %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION) %>% ggplot(aes(x = log2FoldChange, y = avg_log2FC)) + geom_point(alpha = 0.3, col = "blue") + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low Log2FC EMT", x = "Bulk transcriptomics", y = "scRNA-seq transcriptomics") + geom_text_repel(
-  aes(x = log2FoldChange, y = avg_log2FC, label = symbol), data = CIN.DE.c %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
-  )
-
-# Label genes in bulk CIN signature
-CIN.DE.c %>% filter(gene %in% CIN_signature) %>% ggplot(aes(x = log2FoldChange, y = avg_log2FC)) + geom_point(alpha = 0.3, col = "blue") + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low Log2FC INFR and TGFB", x = "Bulk transcriptomics", y = "scRNA-seq transcriptomics") + geom_text_repel(
-  aes(x = log2FoldChange, y = avg_log2FC, label = symbol), data = CIN.DE.c %>% filter(gene %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
-  )
-```
-## Clustering cells on EMT genes
-```{r}
-colfunc <- colorRampPalette(c("blue", "white", "red"))
+# colfunc <- colorRampPalette(c("darkblue", "blue", "white", "red", "darkred"))
 
 # Get the total variance of the scaled counts matrix:
-mat <- Seurat::GetAssayData(scRNA_cn, assay = "RNA", slot = "scale.data")
-mat <- mat[rownames(mat) %in% msigdb_hallmarks_set$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION, ]
+# mat <- Seurat::GetAssayData(scRNA_cn, assay = "RNA", slot = "scale.data")
+# mat <- mat[rownames(mat) %in% msigdb_hallmarks_set$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION, ]
 
+# EMT_signature %in% msigdb_hallmarks_set$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION
 # Z-score matrix counts
-gene_means = rowMeans(mat)
-gene_SDs = rowSds(mat)
+# gene_means = rowMeans(mat)
+# gene_SDs = rowSds(mat)
 
 # If the SD is zero, use 1 instead, it won't affect the mean number
 # another option is to filter these genes out
-gene_SDs[gene_SDs == 0] <- 1
+# gene_SDs[gene_SDs == 0] <- 1
 
-Z_score_mat = (mat - gene_means)/gene_SDs
+# Z_score_mat = (mat - gene_means)/gene_SDs
 
- 
-mat_annotation <- scRNA_cn@meta.data %>% select(orig.ident)
+# mat_annotation <- scRNA_cn@meta.data %>% select(orig.ident)
 
-color_annotation <- list(orig.ident =  c("darkslategray3", "blue4", "red"))
-names(color_annotation$orig.ident) <- unique(mat_annotation$orig.ident)
+# color_annotation <- list(orig.ident =  c("darkslategray3", "blue4", "red"))
+# names(color_annotation$orig.ident) <- unique(mat_annotation$orig.ident)
 
-heatmap <- pheatmap(Z_score_mat, color = colfunc(100), show_colnames = FALSE, annotation_col = mat_annotation, annotation_colors = color_annotation, main = "sc_heatmap on EMT genes")
-
+# heatmap <- pheatmap(Z_score_mat, color = colfunc(100), show_colnames = FALSE, annotation_col = mat_annotation, annotation_colors = color_annotation, main = "pheatmap column scaling")
+# 
+# my.breaks = c(-2.5, 2.5)
+# my.colors <- c(colorRampPalette(colors = c("blue", "white"))(length(my.breaks)/2), colorRampPalette(colors = c("white", "red"))(length(my.breaks)/2))
+# 
+# heatmap_trim <- pheatmap(Z_score_mat, my.colors, show_colnames = FALSE, annotation_col = mat_annotation, annotation_colors = color_annotation, main = "pheatmap column scaling", breaks = my.breaks)
 
 # Using threshold breaks at Z scores of 2.5
-Z_score_mat_t <- Z_score_mat
-Z_score_mat_t[Z_score_mat_t > 2.5] <- 2.5
-Z_score_mat_t[Z_score_mat_t < -2.5] <- -2.5
+# Z_score_mat_t <- Z_score_mat
+# Z_score_mat_t[Z_score_mat_t > 5] <- 5
+# Z_score_mat_t[Z_score_mat_t < -5] <- -5
+# 
+# heatmap_trim <- pheatmap(Z_score_mat_t, color = colfunc(100), show_colnames = FALSE, annotation_col = mat_annotation, annotation_colors = color_annotation, main = "pheatmap column scaling")
+# 
+# save_pheatmap_png <- function(x, filename, width=3500, height=7000, res = 300) {
+#   png(filename, width = width, height = height, res = res)
+#   grid::grid.newpage()
+#   grid::grid.draw(x$gtable)
+#   dev.off()
+# }
 
-heatmap_trim <- pheatmap(Z_score_mat_t, color = colfunc(100), show_colnames = FALSE, annotation_col = mat_annotation, annotation_colors = color_annotation, main = "sc_heatmap on EMT genes")
+knitr::include_graphics(paste(source.output.dir, "EMT_heatmap_trim.png", sep="/"))
+
 
 if(export){
 save_pheatmap_png(heatmap, filename = paste0(source.output.dir, "/EMT_heatmap.png"))
@@ -812,19 +432,11 @@ save_pheatmap_png(heatmap, filename = paste0(source.output.dir, "/EMT_heatmap.pn
 save_pheatmap_png(heatmap_trim, filename = paste0(source.output.dir, "/EMT_heatmap_trim.png"))
 }
 
-rm(color_annotation)
-rm(Z_score_mat_t)
-rm(Z_score_mat)
-rm(mat)
-rm(gene_means)
-rm(gene_SDs)
 ```
-
-## FGSEA DE between clusters
+# FGSEA DE between clusters
 ```{r}
 cluster.DE.fgsea_summary <- read.csv2(file = paste0(source.output.dir, "/scRNA_cluster_fgsea.csv"))
 cluster.DE.fgsea <- cluster.DE.fgsea_summary %>% split(f = cluster.DE.fgsea_summary$cluster)
-
 
 # cluster.DE.l <- cluster.DE %>% select(gene, cluster, avg_log2FC) %>% split(f = cluster.DE$cluster)
 
@@ -839,21 +451,20 @@ cluster.DE.fgsea <- cluster.DE.fgsea_summary %>% split(f = cluster.DE.fgsea_summ
 # Plot results for the GSEA on each cluster 
 lapply(seq_along(cluster.DE.fgsea), FUN = function(i){
   cluster.DE.fgsea[[i]] <- cluster.DE.fgsea[[i]] %>% mutate(
-    within_threshold = pval < 0.05, 
-    pval = ifelse(pval < 0.0001, 0.000101, pval)
+    within_threshold = padj < 0.1, 
+    padj = ifelse(padj < 0.0001, 0.000101, padj)
     ) %>% left_join(msigdb_hallmarks_names)
 
-  cluster.DE.fgsea[[i]] %>% ggplot(aes(x = log10(pval), y = NES)) +
+  cluster.DE.fgsea[[i]] %>% ggplot(aes(x = log10(padj), y = NES)) +
   geom_point(aes(size = 0.5, alpha = 0.3, col = as.factor(sign(NES)))) + 
   geom_hline(yintercept = 0, col = "black") +
   geom_text_repel(
-  aes(x = log10(pval), y = NES, label = name), data = cluster.DE.fgsea[[i]] %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+  aes(x = log10(padj), y = NES, label = name), data = cluster.DE.fgsea[[i]] %>% filter(within_threshold | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
   ) +
-  labs(x = "log10(pval)", y = "Normalized Enrichment Score", col = "Enriched in Cluster", title = paste("Cluster: ", i - 1, sep = "")) + 
+  labs(x = "log10(padj)", y = "Normalized Enrichment Score", col = "Enriched in Cluster", title = paste("Cluster: ", i - 1, sep = "")) + 
   scale_y_continuous(limits = c(-3.5,3.5), breaks = seq(-3.5,3.5,0.5)) + 
   scale_x_continuous(trans = "reverse", limits = c(0, -4), breaks = c(-4, -3, -2, -1, 0) , labels = c("<0.0001", "0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
 })
-
 
 # Combine summaries from the GO enrichment tests
 # cluster.DE.fgsea_summary <- cluster.DE.fgsea[[1]] %>% mutate(cluster = 0) %>% filter(pval == "nothing")
@@ -869,30 +480,98 @@ lapply(seq_along(cluster.DE.fgsea), FUN = function(i){
 if(export){
 cluster.DE.fgsea_summary %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNA_cluster_fgsea.csv"), row.names = FALSE)
 }
+```
 
-cluster.DE.fgsea_summary <- read.csv2(file = paste0(source.output.dir, "/scRNA_cluster_fgsea.csv"))
-cluster.DE.fgsea <- cluster.DE.fgsea_summary %>% split(f = cluster.DE.fgsea_summary$cluster)
+## Heatmap Cluster NES
+```{r}
+save_pheatmap_png <- function(x, filename, width=1200, height=1200, res = 300) {
+  png(filename, width = width, height = height, res = res)
+  grid::grid.newpage()
+  grid::grid.draw(x$gtable)
+  dev.off()
+}
 
+colfunc <- colorRampPalette(c("blue", "white", "red"))
+
+heatmap_data <- cluster.DE.fgsea_summary %>% mutate(NES = ifelse(padj < 0.2, NES, 0)) %>% left_join(msigdb_hallmarks_names) %>% select(name, NES, cluster) %>% pivot_wider(values_from = NES, names_from = name) %>% column_to_rownames("cluster") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix() 
+
+heatmap_data %>% pheatmap(color = colfunc(10))
+NES_cluster_pheatmap <- heatmap_data %>% pheatmap(color = colfunc(10))
+
+# heatmap_data %>% heatmap.2(col=colfunc(10), dendrogram = "both", trace = "none", srtCol = 75, lwid = c(0.5,2), lhei = c(0.4, 1))
+
+if(export){
+save_pheatmap_png(NES_cluster_pheatmap, filename = paste0(source.output.dir, "/NES_clustering_pheatmap.png"), width=2000, height=1200)
+}
+```
+
+## Using 0.001 Pseudocounts
+# FGSEA DE between clusters
+```{r}
+cluster.DE.fgsea_summary2 <- read.csv2(file = paste0(source.output.dir, "/scRNA_cluster_fgsea2.csv"))
+cluster.DE.fgsea2 <- cluster.DE.fgsea_summary2 %>% split(f = cluster.DE.fgsea_summary2$cluster)
+
+# cluster.DE.l2 <- cluster.DE2 %>% select(gene, cluster, avg_log2FC) %>% split(f = cluster.DE$cluster)
+
+# cluster.DE.fgsea2 <- cluster.DE.l2 %>% lapply(FUN = function(x){
+#   x <- x %>% select(-cluster) %>% deframe()
+#   x <- fgsea(pathways = msigdb_hallmarks_set, 
+#                   stats = x,
+#                   minSize = 15,
+#                   maxSize = 500)
+# })
+
+# Plot results for the GSEA on each cluster 
+lapply(seq_along(cluster.DE.fgsea2), FUN = function(i){
+  cluster.DE.fgsea2[[i]] <- cluster.DE.fgsea2[[i]] %>% mutate(
+    within_threshold = padj < 0.1, 
+    padj = ifelse(padj < 0.0001, 0.000101, padj)
+    ) %>% left_join(msigdb_hallmarks_names)
+
+  cluster.DE.fgsea2[[i]] %>% ggplot(aes(x = log10(padj), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = as.factor(sign(NES)))) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(padj), y = NES, label = name), data = cluster.DE.fgsea2[[i]] %>% filter(within_threshold | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) +
+  labs(x = "log10(padj)", y = "Normalized Enrichment Score", col = "Enriched in Cluster", title = paste("Cluster: ", i - 1, sep = "")) + 
+  scale_y_continuous(limits = c(-3.5,3.5), breaks = seq(-3.5,3.5,0.5)) + 
+  scale_x_continuous(trans = "reverse", limits = c(0, -4), breaks = c(-4, -3, -2, -1, 0) , labels = c("<0.0001", "0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+})
+
+
+# Combine summaries from the fGSEA
+# cluster.DE.fgsea_summary2 <- cluster.DE.fgsea2[[1]] %>% mutate(cluster = 0) %>% filter(pval == "nothing")
+
+# for(i in 1:length(cluster.DE.fgsea2)){
+#   print(i)
+#   cluster.DE.fgsea_summary2 <- rbind(
+#     cluster.DE.fgsea_summary2, 
+#     cluster.DE.fgsea2[[i]] %>% mutate(cluster = i-1)
+#     )
+# }
+
+if(export){
+cluster.DE.fgsea_summary2 %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNA_cluster_fgsea2.csv"), row.names = FALSE)
+}
 ```
 ## Heatmap Cluster NES
 ```{r}
 colfunc <- colorRampPalette(c("blue", "white", "red"))
 
-cluster.DE.fgsea_summary %>% left_join(msigdb_hallmarks_names) %>% select(name, NES, cluster) %>% pivot_wider(values_from = NES, names_from = name) %>% column_to_rownames("cluster") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix() %>% pheatmap(color = colfunc(10))
+heatmap_data2 <- cluster.DE.fgsea_summary2 %>% mutate(NES = ifelse(padj < 0.2, NES, 0)) %>% left_join(msigdb_hallmarks_names) %>% select(name, NES, cluster) %>% pivot_wider(values_from = NES, names_from = name) %>% column_to_rownames("cluster") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix()
 
+heatmap_data2 %>% pheatmap(color = colfunc(10))
+NES_cluster_pheatmap2 <- heatmap_data2 %>% pheatmap(color = colfunc(10))
 
-cluster.DE.fgsea_summary %>% left_join(msigdb_hallmarks_names) %>% select(name, NES, cluster) %>% pivot_wider(values_from = NES, names_from = name)  %>% 
-  column_to_rownames(var = "cluster") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix() %>%
-  heatmap.2(col=colfunc(10), dendrogram = "both", trace = "none", srtCol = 75)
+# heatmap_data2 %>% heatmap.2(col=colfunc(10), dendrogram = "both", trace = "none", srtCol = 75)
 
+if(export){
+save_pheatmap_png(NES_cluster_pheatmap2, filename = paste0(source.output.dir, "/NES_clustering_pheatmap2.png"), width=2000, height=1200)
+}
 ```
 
-```{r}
-DimPlot(scRNA_cn, reduction = "UMAP_features", group.by = "orig.ident")
-DimPlot(scRNA_cn, reduction = "UMAP_features", group.by = "clusterID")
-```
-
-## Entrez ID symbol Mapping
+# Entrez ID symbol Mapping
 ```{r}
 # Map symbols to entrezids using Annotation dbi
 entrez_dbi_map <- cluster.DE %>% select(gene) %>% unique()
@@ -903,11 +582,11 @@ entrez_dbi_map$entrezid <- mapIds(org.Hs.eg.db,
                     keytype="SYMBOL",
                     multiVals="first")
 
-entrez_dbi_map %>% filter(is.na(entrezid)) %>% n_distinct() 
+entrez_dbi_map %>% filter(is.na(entrezid)) %>% n_distinct()
 entrez_dbi_map %>% filter(!is.na(entrezid)) %>% n_distinct()
 ```
 
-## GO BP Enrichment
+# GO BP Enrichment
 ```{r}
 cluster.DE.GObp_summary <- read.csv2(file = paste0(source.output.dir, "/scRNA_cluster_GObp.csv"))
 cluster.DE.GObp_summary %>% split(cluster.DE.GObp_summary$cluster)
@@ -951,5 +630,15 @@ cluster.DE.GObp_summary %>% split(cluster.DE.GObp_summary$cluster)
 if(export){
 cluster.DE.GObp_summary %>% write.csv2(file = paste0(source.output.dir, "/scRNA_cluster_GObp.csv"), row.names = FALSE)
 }
+
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+# packageVersion("DESeq2")
+# packinfo <- installed.packages(fields = c("Package", "Version"))
+# packinfo[,c("Package", "Version")]
+# packinfo["graphics",c("Package", "Version")]
 
 ```

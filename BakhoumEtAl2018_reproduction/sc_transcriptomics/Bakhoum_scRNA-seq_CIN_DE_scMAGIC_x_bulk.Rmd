@@ -1,0 +1,549 @@
+---
+title: "Bakhoum et al 2018 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+#BiocManager::install("fgsea", "GO.db", "GOstats", "org.Hs.eg.db")
+
+# install.packages("Seurat", "patchwork", "ggrepel", "sparseMatrixStats", "msigdbr", "tidyverse", "proxy", "plotly", "pheatmap", "gplots", "Rmagic")
+
+library(Seurat)
+library(patchwork)
+library(ggrepel)
+library(sparseMatrixStats)
+library(msigdbr)
+library(tidyverse)
+library(proxy)
+library(fgsea)
+library(plotly)
+library(pheatmap)
+library(gplots)
+library(Rmagic)
+select = dplyr::select
+rename = dplyr::rename
+
+set.seed(42)
+```
+
+# Helper functions
+```{r}
+GeomSplitViolin <- ggproto("GeomSplitViolin", GeomViolin, 
+                           draw_group = function(self, data, ..., draw_quantiles = NULL) {
+  data <- transform(data, xminv = x - violinwidth * (x - xmin), xmaxv = x + violinwidth * (xmax - x))
+  grp <- data[1, "group"]
+  newdata <- plyr::arrange(transform(data, x = if (grp %% 2 == 1) xminv else xmaxv), if (grp %% 2 == 1) y else -y)
+  newdata <- rbind(newdata[1, ], newdata, newdata[nrow(newdata), ], newdata[1, ])
+  newdata[c(1, nrow(newdata) - 1, nrow(newdata)), "x"] <- round(newdata[1, "x"])
+
+  if (length(draw_quantiles) > 0 & !scales::zero_range(range(data$y))) {
+    stopifnot(all(draw_quantiles >= 0), all(draw_quantiles <=
+      1))
+    quantiles <- ggplot2:::create_quantile_segment_frame(data, draw_quantiles)
+    aesthetics <- data[rep(1, nrow(quantiles)), setdiff(names(data), c("x", "y")), drop = FALSE]
+    aesthetics$alpha <- rep(1, nrow(quantiles))
+    both <- cbind(quantiles, aesthetics)
+    quantile_grob <- GeomPath$draw_panel(both, ...)
+    ggplot2:::ggname("geom_split_violin", grid::grobTree(GeomPolygon$draw_panel(newdata, ...), quantile_grob))
+  }
+  else {
+    ggplot2:::ggname("geom_split_violin", GeomPolygon$draw_panel(newdata, ...))
+  }
+})
+
+geom_split_violin <- function(mapping = NULL, data = NULL, stat = "ydensity", position = "identity", ..., 
+                              draw_quantiles = NULL, trim = TRUE, scale = "area", na.rm = FALSE, 
+                              show.legend = NA, inherit.aes = TRUE) {
+  layer(data = data, mapping = mapping, stat = stat, geom = GeomSplitViolin, 
+        position = position, show.legend = show.legend, inherit.aes = inherit.aes, 
+        params = list(trim = trim, scale = scale, draw_quantiles = draw_quantiles, na.rm = na.rm, ...))
+}
+
+# Plot gene expression of CIN high x low cells
+plot_cluster_split_violin <- function(object, id1, id2, gene_list){
+
+  # Subset data
+  id_1 <- subset(object, idents = id1)
+  id_2 <- subset(object, idents = id2)
+
+  # Get expression data of relevant genes as a data frame
+  mat <- Seurat::GetAssayData(id_1, assay = "MAGIC_RNA", slot = "data")
+  mat <- mat[rownames(mat) %in% gene_list, ]
+  df1 <- mat %>% t() %>% as.data.frame() %>% mutate(cluster = id1)
+
+  mat <- Seurat::GetAssayData(id_2, assay = "MAGIC_RNA", slot = "data")
+  mat <- mat[rownames(mat) %in% gene_list, ]
+  df2 <- mat %>% t() %>% as.data.frame() %>% mutate(cluster = id2)
+
+  # Combine data from both IDs
+  df_c <- df1 %>% rbind(df2)
+  df_c <- df_c %>% pivot_longer(cols = gene_list, names_to = "gene", values_to = "value")
+    
+  # Plot
+  plot <- df_c %>% mutate(dummy = "dummy") %>% ggplot(aes(x = dummy, y = value, fill = as.factor(cluster))) + geom_split_violin() + facet_wrap(~gene, scales = "free_x") + coord_flip() + labs(x = "", y = "Expression", fill = "Identity", title = deparse(substitute(gene_list))) +  theme(plot.title = element_text(hjust = 0.5))
+  print(plot)
+  
+#   # Z score and plot
+#   df_z <- df_c %>% group_by(gene) %>% mutate(Z_scored_value = (value-mean(value))/sd(value), dummy = "dummy")
+# # group_by(cluster, gene)
+#   zplot <- df_z %>% ggplot(aes(x = dummy, y = Z_scored_value, fill = as.factor(cluster))) + geom_split_violin() + facet_wrap(~gene, scales = "free_x") + coord_flip() + labs(x = "", y = "Z-scored expression", title = deparse(substitute(gene_list))) +  theme(plot.title = element_text(hjust = 0.5))
+#   print(zplot)
+}
+
+save_pheatmap_png <- function(x, filename, width=3500, height=7000, res = 300) {
+  png(filename, width = width, height = height, res = res)
+  grid::grid.newpage()
+  grid::grid.draw(x$gtable)
+  dev.off()
+}
+
+```
+
+
+```{r}
+# plot_cluster_split_violin(object = scRNAmagic, id1 = "CIN-high", id2 = "CIN-low",  gene_list = CIN_signature)
+```
+
+# Loading data
+```{r}
+# Load data
+scRNAmagic <- readRDS(file = "output_MAGIC/Bakhoum_scRNAmagic.rds")
+scRNAmagic@active.assay <- 'MAGIC_RNA'
+
+CIN.DE.bulk <- read_csv2("data/bulk_transcriptomics_deseq.csv")
+CIN.DE.bulk_noLFC <- read_csv2("data/bulk_transcriptomics_deseq_noLFC.csv")
+
+export = FALSE
+
+# generate output dir path named data
+source.output.dir <- file.path("output_scmagic_x_bulk")
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+} else{
+  print("Output folder already exists")
+}
+
+```
+
+# CIN DE
+```{r}
+# Plot gene expression of CIN high x low cells
+Idents(scRNAmagic) <- "CIN_status"
+
+# Subset data
+CIN_high <- subset(scRNAmagic, idents = "CIN-high")
+CIN_low <- subset(scRNAmagic, idents = "CIN-low")
+
+# Calculate average gene expression for CIN high and low cells
+avg.CINhigh.cells <- as.data.frame(AverageExpression(CIN_high, assay = "MAGIC_RNA", slot = "data")) %>% rename("CIN_high" = all) %>% rownames_to_column("gene")
+
+avg.CINlow.cells <- as.data.frame(AverageExpression(CIN_low,, assay = "MAGIC_RNA", slot = "scale.data")) %>% rename("CIN_low" = all) %>% rownames_to_column("gene")
+
+mat <- Seurat::GetAssayData(scRNAmagic, assay = "MAGIC_RNA", slot = "data")
+
+summary(mat[rownames(mat) %in% c("FTL"), ])
+
+sc_means <- mat %>% rowMeans() %>% as.data.frame() %>% rename("sc_mean" = ".") %>% rownames_to_column("symbol")
+
+# Plot CIN high x cin low pseudocounts in log space
+avg.CINhigh.cells %>% full_join(avg.CINlow.cells, by = "gene") %>% ggplot(aes(x = CIN_low, y = CIN_high)) + geom_point()
+
+# avg.CINhigh.cells %>% full_join(avg.CINlow.cells, by = "gene") %>% mutate(fc = (CIN_high + 1)/(CIN_low + 1), log2fc = log2(fc)) %>% filter(gene %in% c("LAPTM5", "MARCKSL1", "HLA-B"))
+
+```
+
+```{r}
+# Find CIN-high markers based on DE 
+Idents(scRNAmagic) <- "CIN_status"
+
+# CIN.DE.magic <- FindMarkers(scRNAmagic, ident.1 = "CIN-high", min.pct = 0, logfc.threshold = 0, pseudocount.use = 0.001) %>% rownames_to_column("gene")
+
+if (export){
+CIN.DE.magic %>% write.csv2(file = paste0(source.output.dir, "/Bakhoum_scRNA_CIN_DE_magic.csv"), row.names = FALSE)
+}
+
+```
+
+```{r}
+# Import objects instead of running expensive computations again
+CIN.DE.magic <- read.csv2(paste0(source.output.dir, "/Bakhoum_scRNA_CIN_DE_magic.csv"))
+```
+
+```{r}
+CIN.top <- CIN.DE.magic %>% top_n(n = 25, wt = avg_log2FC)
+
+DoHeatmap(scRNAmagic, features = CIN.top$gene)
+```
+
+```{r}
+# Calculating scRNA log2fc with pseudocounts manually
+CIN.DE.magic %>% filter(gene %in% c("LAPTM5", "MARCKSL1", "HLA-B"))
+
+sc_means_df <- avg.CINhigh.cells %>% full_join(avg.CINlow.cells, by = "gene") %>% mutate(raw_fc = CIN_high/CIN_low, log2raw_fc = log2(raw_fc), fc = (CIN_high + 1)/(CIN_low + 1), log2fc = log2(fc), spfc = (CIN_high+0.001)/(CIN_low+0.001), log2spfc = log2(spfc)) 
+
+sc_means_df %>% filter(gene %in% c("LAPTM5", "MARCKSL1", "HLA-B"))
+
+Idents(scRNAmagic) <- ""
+as.data.frame(AverageExpression(scRNAmagic, slot = "counts")) %>% summary()
+```
+
+```{r}
+# Plot gene expression of CIN high x low cells, labeling DE genes
+DE_comp <- avg.CINhigh.cells %>% full_join(avg.CINlow.cells, by = "gene") %>% left_join(
+  CIN.DE.magic %>% mutate(CIN_DE = TRUE, label = p_val_adj < 1e-260)  %>% select(gene, CIN_DE, label)
+)
+
+DE_comp %>% ggplot(aes(x = CIN_low, y = CIN_high, col = label)) + geom_point() +
+  geom_text_repel(
+  aes(x = CIN_low, y = CIN_high, label = gene), data = DE_comp %>% filter(label), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+  ) + theme(legend.position = "none") + scale_y_continuous(trans = "log1p") + scale_x_continuous(trans = "log1p")
+
+# rm(avg.CINhigh.cells, avg.CINlow.cells, CIN_high, CIN_low, DE_comp, scRNAmagic)
+```
+
+# Compare with bulk CIN signature
+```{r}
+CIN_signature <- c('PELI2','BMP2','SHH','TNS4','RAB3B','ROBO1','ARHGAP28','CHN2','CST1','F13A1','CPVL','SEMA6D','NHSL2','GTF2IP7','DPYSL3','PCDH7','KHDRBS3','TRAC','TMEM156', 'CST4','CD24','FGF5','NTN4')
+
+# Compare with Bakhoum CIN gene signature
+CIN_signature_df <- CIN_signature %>% as.data.frame() %>% rename('gene' = ".") %>% mutate(Bakhoum_gene_sig = TRUE)
+
+CIN.DE.magic %>% left_join(CIN_signature_df) %>% filter(Bakhoum_gene_sig)
+
+# CIN.DE.magic %>% arrange(-avg_log2FC) %>% head(25) %>% left_join(CIN_signature_df) %>% filter(Bakhoum_gene_sig)
+# CIN.DE.magic %>% summary()
+```
+
+# Volcano Plots
+```{r}
+alpha = 1e-15
+log2FCthresh = 3
+
+CIN.DE.magic <- CIN.DE.magic %>% mutate(
+  within_threshold = (p_val < alpha & abs(avg_log2FC) > log2FCthresh)
+)
+
+#df.volcano <- df.deseq.results %>% mutate(threshold = (abs(log2FoldChange) > 2 & padj < alpha))
+
+CIN.DE.magic.cutoff <- CIN.DE.magic %>% mutate(avg_log2FC = ifelse(abs(avg_log2FC) > 25, Inf * sign(avg_log2FC), avg_log2FC))
+
+CIN.DE.magic.cutoff %>% ggplot(
+  aes(x=avg_log2FC , y= -log10(p_val + 1e-300), col = within_threshold)) +     geom_point(alpha = 0.5) +
+geom_vline(xintercept = 0, col = "black") + 
+geom_vline(xintercept = c(-log2FCthresh, log2FCthresh), col = "red") +   geom_hline(yintercept = -log10(alpha), colour = "red") + 
+geom_text_repel(
+  aes(x = avg_log2FC, y = -log10(p_val + 1e-300), label = gene), data = CIN.DE.magic.cutoff %>% filter(within_threshold), colour = "grey20", min.segment.length = 0
+  ) +
+  theme(legend.position = "none", plot.title = element_text(hjust= 0.5)) +
+  labs(
+    title = "Volcano plot", 
+    x = "Effect size: log2(fold-change)", 
+    y = "-log10(p-value)"
+  )
+```
+
+# Plotting signatures
+## EMT
+```{r}
+# Plotting EMT signature 
+EMT_signature <- c("EZH", "JUN", "VIM", "STEAP1", "SOX4", "MMP14", "SHH", "TIMP1", "ZEB1", "ZEB2", "SNAI2")
+# FeaturePlot(scRNA_regcycle, features = EMT_signature)
+
+EMT_signature <- EMT_signature[EMT_signature %in% rownames(scRNAmagic@assays$RNA)]
+
+Idents(scRNAmagic) <- "CIN_status"
+for(i in 1:length(EMT_signature)){
+p <- VlnPlot(scRNAmagic, features = EMT_signature[i])
+print(p)
+}
+
+```
+## M Signature
+```{r}
+# Plotting Genes enriched in the "M" Population from Bakhoum et al Extended figure 6b 
+M_markers <- c("ITGB5", "ITGB1", "ITGA5", "ITGA10", "IGFBP4", "FN1", "DSC2", "CXCL1","CTNNB1", "BMP4", "BCL2L1", "VIM", "TIMP1", "TGFBR2", "TGFBI", "TGFB1", "PPARG", "NUPR1", "MSN", "LMCD1", "LEF1", "JAG1")
+
+M_markers <- M_markers[M_markers %in% rownames(scRNAmagic@assays$RNA)]
+
+Idents(scRNAmagic) <- "CIN_status"
+for(i in 1:length(M_markers)){
+p <- VlnPlot(scRNAmagic, features = M_markers[i])
+print(p)
+}
+```
+
+## CIN signature
+```{r}
+# Plot CIN signature from Bakhoum et al 2018 (Supp. table 5), comparing CIN high and CIN low
+CIN_signature <- c('PELI2','BMP2','SHH','TNS4','RAB3B','ROBO1','ARHGAP28','CHN2','CST1','F13A1','CPVL','SEMA6D','NHSL2','GTF2IP7','DPYSL3','PCDH7','KHDRBS3','TRAC','TMEM156', 'CST4','CD24','FGF5','NTN4')
+
+CIN_signature <- CIN_signature[CIN_signature %in% rownames(scRNAmagic@assays$RNA)]
+
+Idents(scRNAmagic) <- "CIN_status"
+for(i in 1:length(CIN_signature)){
+p <- VlnPlot(scRNAmagic, features = CIN_signature[i])
+print(p)
+}
+```
+# Split violins
+```{r}
+ Idents(scRNAmagic) <- "CIN_status"
+
+plot_cluster_split_violin(object = scRNAmagic, id1 = "CIN-high", id2 = "CIN-low", gene_list = EMT_signature)
+
+if(export){
+ggsave(file = paste0(source.output.dir, "/scRNA_magic_EMTviolin.png"), width=6, height=4, dpi=300)
+}
+
+plot_cluster_split_violin(object = scRNAmagic, id1 = "CIN-high", id2 = "CIN-low", gene_list = M_markers)
+
+if(export){
+ggsave(file = paste0(source.output.dir, "/scRNA_magic_Mviolin.png"), width=8, height=6, dpi=300)
+}
+
+plot_cluster_split_violin(object = scRNAmagic, id1 = "CIN-high", id2 = "CIN-low",  gene_list = CIN_signature)
+
+if(export){
+ggsave(file = paste0(source.output.dir, "/scRNA_magic_CINviolin.png"), width=8, height=6, dpi=300)
+}
+```
+
+# Compare with Bulk CIN DE
+```{r}
+CIN.DE.c <- CIN.DE.bulk %>% inner_join(CIN.DE.magic %>% rename("symbol" = gene, "within_threshold_sc" = within_threshold), by = "symbol")
+
+CIN.DE.c.cutoff <- CIN.DE.c %>% mutate(avg_log2FC = ifelse(abs(avg_log2FC) > 20, Inf * sign(avg_log2FC), avg_log2FC))
+
+
+CIN.DE.c.cutoff %>% ggplot(aes(x = log2FoldChange, y = avg_log2FC)) + geom_point(alpha = 0.3, col = "blue") + geom_abline(slope = 1, col = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low Log2FC", x = "Bulk transcriptomics", y = "scRNA-seq transcriptomics") + geom_text_repel(
+  aes(x = log2FoldChange, y = avg_log2FC, label = symbol), data = CIN.DE.c.cutoff %>% filter(symbol %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(legend.position = "none", plot.title = element_text(hjust= 0.5))
+
+if(export){
+  ggsave(file=paste0(source.output.dir,"/scmagic_x_bulk_shrunkLFC.png"), width=6, height=4, dpi=300)
+}
+
+cor(CIN.DE.c$log2FoldChange, CIN.DE.c$avg_log2FC)
+
+# Check agreement between the sign of genes
+table(sign(CIN.DE.c$log2FoldChange), sign(CIN.DE.c$avg_log2FC))
+prop.table(table(sign(CIN.DE.c$log2FoldChange), sign(CIN.DE.c$avg_log2FC)))
+```
+
+# Compare with not shrunk LFC - gene correlation
+```{r}
+CIN.DE.c_noLFC <- CIN.DE.bulk_noLFC %>% inner_join(CIN.DE.magic %>% rename("symbol" = gene), by = "symbol") %>% mutate(bulk_sign = sign(log2FoldChange), sc_sign = sign(avg_log2FC))
+
+CIN.DE.c_noLFC.cutoff <- CIN.DE.c_noLFC %>% mutate(avg_log2FC = ifelse(abs(avg_log2FC) > 20, Inf * sign(avg_log2FC), avg_log2FC))
+
+CIN.DE.c_noLFC.cutoff %>% ggplot(aes(x = log2FoldChange, y = avg_log2FC)) + geom_point(alpha = 0.3, col = "blue") + geom_abline(slope = 1, col = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low", x = "Bulk transcriptomics log2fc", y = "scRNA-seq transcriptomics log2fc") + geom_text_repel(
+  aes(x = log2FoldChange, y = avg_log2FC, label = symbol), data = CIN.DE.c_noLFC.cutoff %>% filter(symbol %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5))
+
+
+if(export){
+  ggsave(file=paste0(source.output.dir,"/scmagic_x_bulk_notshrunkLFC.png"), width=6, height=4, dpi=300)
+}
+
+cor(CIN.DE.c_noLFC$log2FoldChange, CIN.DE.c_noLFC$avg_log2FC)
+```
+
+# Compare with Bulk stat, instead of shrunk LFC - gene correlation
+```{r}
+CIN.DE.c_noLFC.cutoff %>% ggplot(aes(x = stat, y = avg_log2FC)) + geom_point(alpha = 0.3, col = "blue") + geom_abline(slope = 1, col = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low", x = "Bulk transcriptomics Wald Stat", y = "scRNA-seq transcriptomics log2fc") + geom_text_repel(
+  aes(x = stat, y = avg_log2FC, label = symbol), data = CIN.DE.c_noLFC.cutoff %>% filter(symbol %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5))
+
+
+if(export){
+  ggsave(file=paste0(source.output.dir,"/scmagic_x_bulk_stat.png"), width=6, height=4, dpi=300)
+}
+
+cor(CIN.DE.c_noLFC$stat, CIN.DE.c_noLFC$avg_log2FC)
+
+```
+
+```{r}
+CIN.DE.c <- CIN.DE.c %>% mutate(sc_bulk_ratio = avg_log2FC/log2FoldChange, bulk_sc_ratio = log2FoldChange/avg_log2FC) %>% left_join(sc_means)
+
+CIN.DE.c %>% select(sc_bulk_ratio, bulk_sc_ratio, baseMean, sc_mean) %>% summary()
+
+CIN.DE.c %>% ggplot(aes(sc_bulk_ratio)) + geom_histogram(col = "blue", bins = 1000) + labs(title = "CIN-High x CIN-Low", x = "scRNA-seq/Bulk Log2FC transcriptomics", y = "Count")
+
+CIN.DE.c %>% ggplot(aes(sc_bulk_ratio)) + geom_histogram(col = "blue", bins = 100) + labs(title = "CIN-High x CIN-Low", x = "scRNA-seq/Bulk Log2FC transcriptomics", y = "Count") + xlim(-10, 10)
+
+```
+
+
+```{r}
+CIN.DE.c %>% ggplot(aes(x = sc_bulk_ratio, y = baseMean, col = log(pvalue))) + geom_point()  + geom_text_repel(
+  aes(x = sc_bulk_ratio, y = baseMean, label = symbol), data = CIN.DE.c %>% filter(abs(sc_bulk_ratio) > 10), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + scale_color_gradient2(low="blue", mid = "black", high="red", midpoint = -2)
+
+CIN.DE.c %>% ggplot(aes(x = sc_bulk_ratio, y = baseMean, col = log(pvalue))) + geom_point()  + geom_text_repel(
+  aes(x = sc_bulk_ratio, y = baseMean, label = symbol), data = CIN.DE.c %>% filter(abs(sc_bulk_ratio) > 10), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + xlim(-100, 100) + scale_color_gradient2(low="blue", mid = "black", high="red", midpoint = -2)
+
+CIN.DE.c %>% ggplot(aes(x = bulk_sc_ratio, y = baseMean, col = log(pvalue))) + geom_point()  + geom_text_repel(
+  aes(x = bulk_sc_ratio, y = baseMean, label = symbol), data = CIN.DE.c %>% filter(abs(sc_bulk_ratio) > 10), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + scale_color_gradient2(low="blue", mid = "black", high="red", midpoint = -2)
+
+CIN.DE.c %>% ggplot(aes(x = sc_bulk_ratio, y = baseMean, col = sc_mean)) + geom_point()  + geom_text_repel(
+  aes(x = sc_bulk_ratio, y = baseMean, label = symbol), data = CIN.DE.c %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  )
+```
+
+
+```{r}
+CIN.DE.c %>% ggplot(aes(x = sc_mean, y = baseMean, col = log(pvalue))) + geom_point()  + geom_text_repel(
+  aes(x = sc_mean, y = baseMean, label = symbol), data = CIN.DE.c %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  )
+
+CIN.DE.c %>% filter(pvalue < 0.01) %>% ggplot(aes(x = sc_mean, y = baseMean, col = log(pvalue))) + geom_point()  + geom_text_repel(
+  aes(x = sc_mean, y = baseMean, label = symbol), data = CIN.DE.c %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  )
+```
+
+```{r}
+# Investigate count numbers for outlying genes
+df.counts.raw <- read.csv("data/GSE98183_Counts.geneSymbols.75bpPE.csv") 
+colnames(df.counts.raw) <- c("gene", "MK", "MKH", "Kb", "Ka", "cont")
+
+inspect_filter <- c("CSAG1","SOX4", "FOXA2","CPVL","CST1","CST4","FGF5", "RASD1","CST7", "LINC01088","ENSG00000227706", "MAGEA12")
+
+CIN.DE.c %>% filter(gene %in% inspect_filter)
+
+df.counts.raw %>% filter(gene %in% inspect_filter)
+
+# sc_means_df %>% select(-c(raw_fc, fc, spfc)) %>% filter(gene %in% inspect_filter)
+```
+
+# Load msigdb hallmarks gene set
+```{r}
+all_gene_sets <- msigdbr("Homo sapiens")
+
+msigdb_hallmarks_set <- filter(all_gene_sets, gs_cat == "H") %>% select(gs_name, gene_symbol)
+
+msigdb_hallmarks_set <- split(msigdb_hallmarks_set$gene_symbol, msigdb_hallmarks_set$gs_name)
+
+msigdb_hallmarks_names <- read.csv2("data/names_hallmarks.csv")
+
+rm(all_gene_sets)
+# Another option is loading files with gene sets
+# msigdb_hallmarks <- gmtPathways("data/h.all.v7.4.symbols.gmt")
+# msigdb_hallmarks %>% head() %>% lapply(head)
+
+```
+
+# Compare specific hallmarks
+```{r}
+# Label genes from the inflammatory response
+CIN.DE.c %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_INFLAMMATORY_RESPONSE) %>% ggplot(aes(x = log2FoldChange, y = avg_log2FC)) + geom_point(alpha = 0.3, col = "blue") + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low Log2FC Inflammatory response", x = "Bulk transcriptomics", y = "scRNA-seq transcriptomics") + geom_text_repel(
+  aes(x = log2FoldChange, y = avg_log2FC, label = symbol), data = CIN.DE.c %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_INFLAMMATORY_RESPONSE), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5))
+
+# Label genes from the EMT
+CIN.DE.c %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION) %>% ggplot(aes(x = log2FoldChange, y = avg_log2FC)) + geom_point(alpha = 0.3, col = "blue") + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low Log2FC EMT", x = "Bulk transcriptomics", y = "scRNA-seq transcriptomics") + geom_text_repel(
+  aes(x = log2FoldChange, y = avg_log2FC, label = symbol), data = CIN.DE.c %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5))
+
+# Label genes in bulk CIN signature
+CIN.DE.c %>% filter(gene %in% CIN_signature) %>% ggplot(aes(x = log2FoldChange, y = avg_log2FC)) + geom_point(alpha = 0.3, col = "blue") + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low Log2FC CIN Signature", x = "Bulk transcriptomics", y = "scRNA-seq transcriptomics") + geom_text_repel(
+  aes(x = log2FoldChange, y = avg_log2FC, label = symbol), data = CIN.DE.c %>% filter(gene %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+sc_means_df %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION)
+```
+
+# CIN High x CIN Low
+## FGSEA
+```{r}
+CIN_fc_rnk <- CIN.DE.magic %>% select(gene, avg_log2FC) %>% deframe()
+
+fgseaRes <- read.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_CIN_highlow.csv"))
+
+
+fgseaRes <- fgsea(pathways = msigdb_hallmarks_set,
+                  stats    = CIN_fc_rnk,
+                  minSize  = 15,
+                  maxSize  = 500)
+ 
+fgseaRes <- fgseaRes %>% mutate(within_threshold = pval < 0.05, "Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low")) %>% left_join(msigdb_hallmarks_names)
+
+plotEnrichment(msigdb_hallmarks_set[["HALLMARK_KRAS_SIGNALING_UP"]],
+               CIN_fc_rnk) + labs(title="KRAS Signaling")
+
+plotEnrichment(msigdb_hallmarks_set[["HALLMARK_INFLAMMATORY_RESPONSE"]],
+               CIN_fc_rnk) + labs(title="Inflammatory Response")
+
+fgseaRes %>% select(padj, NES) %>% summary()
+#fgseaRes %>% select(-leadingEdge) %>% write.csv2("data/fgsea_cin_high_low.csv")
+
+fgseaRes %>% mutate(padj = ifelse(padj < 0.01, 0.0101, padj)) %>% ggplot(aes(x = log10(padj), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) +
+  geom_hline(yintercept = 0, col = "black") + 
+  geom_text_repel(
+    aes(x = log10(padj), y = NES, label = name), data = fgseaRes %>% filter(within_threshold | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+    ) + labs(x = "log10(padj)", y = "Normalized Enrichment Score", col = "Enriched in") + 
+  scale_y_continuous(limits = c(-2,2.5), breaks = seq(-2,2.5,1)) +scale_x_continuous(trans = "reverse", limits = c(0, -2), breaks = c(-2, -1, 0) , labels = c("<0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+
+if (export){
+ggsave(file = paste0(source.output.dir, "/fGSEA_scRNA_results_fc.png"), width=8, height=5, dpi=300)
+}
+
+if(export){
+  fgseaRes %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_CIN_highlow.csv"), row.names = FALSE)
+}
+
+```
+
+## Compare with Bulk GSEA NES
+```{r}
+Bulk_gsea <- read.csv2("data/Supp_table6.csv")
+```
+
+```{r}
+# sc FGSEA x Bulk
+fGSEA_comp <- Bulk_gsea %>% select(NAME, NES, FDR.q.val) %>% rename(BULK_NES = NES, BULK_FDR.q.val = FDR.q.val) %>% left_join(
+  fgseaRes %>% select(pathway, NES, pval, padj) %>% rename(NAME = pathway, scNES = NES, scFDRq = padj) 
+) %>% left_join(
+  msigdb_hallmarks_names %>% rename(NAME = pathway)
+  ) %>% mutate(sign_agreement = sign(BULK_NES) == sign(scNES))
+
+fGSEA_comp %>% ggplot(aes(x = BULK_NES, y = scNES, col = log10(scFDRq), shape = scFDRq < 0.2)) + 
+  geom_point() + geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = BULK_NES, y = scNES, label = name), data = fGSEA_comp %>% filter((!sign_agreement & scFDRq < 0.2) | name %in% c("Inflammatory Response", "EMT")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + labs(x = "Bulk GSEA NES", y = "scRNA fGSEA NES") +
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -2)
+
+if (export){
+  ggsave(file = paste0(source.output.dir, "/fGSEA_scRNAmagic_x_bulk.png"), width=6, height=4, dpi=300)
+
+}
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+```
+
+
+
+
+

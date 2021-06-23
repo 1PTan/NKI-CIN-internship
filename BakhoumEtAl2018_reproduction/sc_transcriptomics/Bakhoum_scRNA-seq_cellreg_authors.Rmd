@@ -1,0 +1,366 @@
+---
+title: "Bakhoum et al 2018 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+#BiocManager::install("DropletUtils")
+# library(DropletUtils)
+# install.packages("Seurat")
+library(Seurat)
+# install.packages("patchwork")
+library(patchwork)
+# install.packages("ggrepel")
+library(ggrepel)
+# install.packages("sparseMatrixStats")
+library(sparseMatrixStats)
+#install.packages("msigdbr")
+library(msigdbr)
+# BiocManager::install("GO.db")
+library(GO.db)
+# BiocManager::install("GOstats")
+library(GOstats)
+# BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+# install.packages("tidyverse")
+library(tidyverse)
+# install.packages("proxy")
+library(proxy)
+# BiocManager::install("fgsea")
+library(fgsea)
+# install.packages('plotly')
+library(plotly)
+# install.packages('pheatmap')
+library(pheatmap)
+# install.packages("gplots")
+library(gplots)
+
+select = dplyr::select
+rename = dplyr::rename
+```
+
+# Defining Functions
+```{r}
+# Wrapper function for split violin plots
+
+GeomSplitViolin <- ggproto("GeomSplitViolin", GeomViolin, 
+                           draw_group = function(self, data, ..., draw_quantiles = NULL) {
+  data <- transform(data, xminv = x - violinwidth * (x - xmin), xmaxv = x + violinwidth * (xmax - x))
+  grp <- data[1, "group"]
+  newdata <- plyr::arrange(transform(data, x = if (grp %% 2 == 1) xminv else xmaxv), if (grp %% 2 == 1) y else -y)
+  newdata <- rbind(newdata[1, ], newdata, newdata[nrow(newdata), ], newdata[1, ])
+  newdata[c(1, nrow(newdata) - 1, nrow(newdata)), "x"] <- round(newdata[1, "x"])
+
+  if (length(draw_quantiles) > 0 & !scales::zero_range(range(data$y))) {
+    stopifnot(all(draw_quantiles >= 0), all(draw_quantiles <=
+      1))
+    quantiles <- ggplot2:::create_quantile_segment_frame(data, draw_quantiles)
+    aesthetics <- data[rep(1, nrow(quantiles)), setdiff(names(data), c("x", "y")), drop = FALSE]
+    aesthetics$alpha <- rep(1, nrow(quantiles))
+    both <- cbind(quantiles, aesthetics)
+    quantile_grob <- GeomPath$draw_panel(both, ...)
+    ggplot2:::ggname("geom_split_violin", grid::grobTree(GeomPolygon$draw_panel(newdata, ...), quantile_grob))
+  }
+  else {
+    ggplot2:::ggname("geom_split_violin", GeomPolygon$draw_panel(newdata, ...))
+  }
+})
+
+geom_split_violin <- function(mapping = NULL, data = NULL, stat = "ydensity", position = "identity", ..., 
+                              draw_quantiles = NULL, trim = TRUE, scale = "area", na.rm = FALSE, 
+                              show.legend = NA, inherit.aes = TRUE) {
+  layer(data = data, mapping = mapping, stat = stat, geom = GeomSplitViolin, 
+        position = position, show.legend = show.legend, inherit.aes = inherit.aes, 
+        params = list(trim = trim, scale = scale, draw_quantiles = draw_quantiles, na.rm = na.rm, ...))
+}
+```
+
+```{r}
+# Plot gene expression of CIN high x low cells
+plot_cluster_split_violin <- function(object, id1, id2, gene_list){
+
+  # Subset data
+  id_1 <- subset(object, idents = id1)
+  id_2 <- subset(object, idents = id2)
+
+  # Get expression data of relevant genes as a data frame
+  mat <- Seurat::GetAssayData(id_1, assay = "RNA")
+  mat <- mat[rownames(mat) %in% gene_list, ]
+  df1 <- mat %>% t() %>% as.data.frame() %>% mutate(cluster = id1)
+
+  mat <- Seurat::GetAssayData(id_2, assay = "RNA")
+  mat <- mat[rownames(mat) %in% gene_list, ]
+  df2 <- mat %>% t() %>% as.data.frame() %>% mutate(cluster = id2)
+
+  # Combine data from both IDs
+  df_c <- df1 %>% rbind(df2)
+  df_c <- df_c %>% pivot_longer(cols = gene_list, names_to = "gene", values_to = "value")
+    
+  # Z score and plot
+  df_z <- df_c %>% group_by(cluster, gene) %>% mutate(Z_scored_value = (value-mean(value))/sd(value), dummy = "dummy")
+  
+# df_c %>% group_by(cluster, gene) %>% filter(gene == "JUN") %>% summarize(mean = mean(value), sd = sd(value), Z = (value - mean)/sd)
+  df_z %>% ggplot(aes(x = dummy, y = Z_scored_value, fill = cluster)) + geom_split_violin() + facet_wrap(~gene, scales = "free_x") + coord_flip() + labs(x = "", y = "Z-scored expression", title = deparse(substitute(gene_list))) +  theme(plot.title = element_text(hjust = 0.5))
+}
+```
+
+# Loading data
+```{r}
+# Load filtered and combined data
+# scRNA_c <- readRDS(file = "data/scRNA_c.rds")
+
+export = FALSE
+
+# generate output dir path named data
+source.output.dir <- file.path("output_cellreg")
+
+# if source output dir does not exist, create it
+if (export){
+  if (!dir.exists(source.output.dir)) {dir.create(source.output.dir)} else{print("Output folder already exists")}
+}
+
+```
+
+```{r}
+# Load object from Seurat instead of handling objects and computations in this script
+scRNA_regcycle <- readRDS(file = paste0(source.output.dir, "/Bakhoum_scRNA_cellreg.rds"))
+
+cellreg.cluster.DE <- read.csv2(file = paste0(source.output.dir, "/Bakhoum_scRNA_cellreg_cluster_markers.csv"))
+cellreg.CIN.DE <- read.csv2(file = paste0(source.output.dir, "/Bakhoum_scRNA_cellreg_CIN_cluster_markers.csv"))
+
+```
+
+# Regress cell cycle scores during data scaling
+```{r}
+# median_library_size <- scRNA_c@assays$RNA %>% colSums() %>% median()
+
+# Normalize dataset
+# scRNA_regcycle <- NormalizeData(scRNA_c, normalization.method = "LogNormalize", scale.factor = median_library_size)
+
+# find highly variable features with a variance stabilizing transform
+# scRNA_regcycle <- FindVariableFeatures(scRNA_regcycle, selection.method = "vst", nfeatures = 2000)
+
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can
+# segregate this list into markers of G2/M phase and markers of S phase
+# s.genes <- cc.genes$s.genes
+# g2m.genes <- cc.genes$g2m.genes
+
+# Assign and inspect cell cycle scores
+# scRNA_regcycle <- CellCycleScoring(scRNA_regcycle, s.features = s.genes, g2m.features = g2m.genes)
+
+# Scale dataset
+# vars_to_regress <- c("S.Score", "G2M.Score")
+
+# scRNA_regcycle <- ScaleData(scRNA_regcycle,
+#                     vars.to.regress = vars_to_regress)
+
+# Another option is regressing the difference between S and G2M scores. Differences between G1 and proliferating cells would be mantained, but S and G2M cells tend to be mixed
+# scRNA_regcycle$CC.Difference <- scRNA_regcycle$S.Score - scRNA_regcycle$G2M.Score
+# scRNA_regcycle <- ScaleData(scRNA_regcycle, vars.to.regress = "CC.Difference", features = rownames(scRNA_regcycle))
+
+
+# Add CIN status meta data
+# scRNA_regcycle@meta.data <- scRNA_regcycle@meta.data %>% mutate(CIN_status = ifelse(orig.ident %in% c("dnMCAK"),"CIN-high","CIN-low"))
+
+```
+
+# Perform PCA
+```{r}
+# Perform PCA
+# scRNA_regcycle <- RunPCA(scRNA_regcycle, features = VariableFeatures(object = scRNA_regcycle), npcs = 200)
+```
+
+# Run UMAP and TSNE
+```{r}
+# Dimensionality reduction with UMAP and tSNE on PCs
+# scRNA_regcycle <- RunUMAP(scRNA_regcycle, dims = 1:200)
+
+# scRNA_regcycle <- RunTSNE(scRNA_regcycle, dims.use = 1:200, reduction.use = "pca", perplexity = 30)
+
+```
+
+# Clustering cells
+```{r}
+# Clustering cells
+# scRNA_regcycle <- FindNeighbors(scRNA_regcycle, dims = 1:200)
+# scRNA_regcycle <- FindClusters(scRNA_regcycle, resolution = 0.5)
+# 
+# scRNA_regcycle <- StashIdent(scRNA_regcycle, save.name = "clusterID")
+
+# Inspect cluster information
+#head(Idents(scRNA_cn), 5)
+Idents(scRNA_regcycle) <- "clusterID"
+
+prop.table(table(scRNA_regcycle$CIN_status))
+
+table(scRNA_regcycle$orig.ident)
+
+table(scRNA_regcycle$clusterID, scRNA_regcycle$CIN_status) %>% as.data.frame() %>% rename("clusterID" = Var1, "group" = Var2) %>% ggplot(aes(x = clusterID, y = group, fill = Freq)) + geom_tile() + scale_fill_distiller(palette = "PuBu") + geom_text(aes(label=Freq)) + labs(y = "", fill = "Number of cells")
+
+```
+
+# Visualization
+```{r}
+DimPlot(scRNA_regcycle, reduction = "umap", group.by = "orig.ident")
+DimPlot(scRNA_regcycle, reduction = "umap", group.by = "clusterID")
+```
+# Cluster markers
+```{r}
+# Find cluster markers 
+# Idents(scRNA_regcycle) <- "clusterID"
+# cellreg.cluster.DE <- FindAllMarkers(scRNA_regcycle, min.pct = 0.05, logfc.threshold = 0)
+
+# cellreg.cluster.DE2 <- FindAllMarkers(scRNA_regcycle, min.pct = 0.01, logfc.threshold = 0, pseudocount.use = 0.001)
+```
+
+# Load msigdb hallmarks gene set
+```{r}
+# all_gene_sets <- msigdbr("Homo sapiens")
+
+# msigdb_hallmarks_set <- filter(all_gene_sets, gs_cat == "H") %>% select(gs_name, gene_symbol)
+
+# msigdb_hallmarks_set <- split(msigdb_hallmarks_set$gene_symbol, msigdb_hallmarks_set$gs_name)
+
+msigdb_hallmarks_names <- read.csv2("data/names_hallmarks.csv")
+
+# rm(all_gene_sets)
+# Another option is loading files with gene sets
+# msigdb_hallmarks <- gmtPathways("data/h.all.v7.4.symbols.gmt")
+# msigdb_hallmarks %>% head() %>% lapply(head)
+
+```
+
+# FGSEA DE between clusters
+```{r}
+cellreg.cluster.DE.fgsea_summary <- read.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_clusters_fgsea.csv"))
+cellreg.cluster.DE.fgsea <- cellreg.cluster.DE.fgsea_summary %>% split(f = cellreg.cluster.DE.fgsea_summary$cluster)
+
+
+# cellreg.cluster.DE.l <- cellreg.cluster.DE %>% select(gene, cluster, avg_log2FC) %>% split(f = cellreg.cluster.DE$cluster)
+
+# cellreg.cluster.DE.fgsea <- cellreg.cluster.DE.l %>% lapply(FUN = function(x){
+#   x <- x %>% select(-cluster) %>% deframe()
+#   x <- fgsea(pathways = msigdb_hallmarks_set, 
+#                   stats = x,
+#                   minSize = 15,
+#                   maxSize = 500)
+# })
+
+
+# Plot results for the GSEA on each cluster 
+lapply(seq_along(cellreg.cluster.DE.fgsea), FUN = function(i){
+  cellreg.cluster.DE.fgsea[[i]] <- cellreg.cluster.DE.fgsea[[i]] %>% mutate(
+    within_threshold = pval < 0.05, 
+    pval = ifelse(pval < 0.0001, 0.000101, pval)
+    ) %>% left_join(msigdb_hallmarks_names)
+
+  cellreg.cluster.DE.fgsea[[i]] %>% ggplot(aes(x = log10(pval), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = as.factor(sign(NES)))) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(pval), y = NES, label = name), data = cellreg.cluster.DE.fgsea[[i]] %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) +
+  labs(x = "log10(pval)", y = "Normalized Enrichment Score", col = "Enriched in Cluster", title = paste("Cluster: ", i - 1, sep = "")) + 
+  scale_y_continuous(limits = c(-3,3), breaks = seq(-3,3,1)) + 
+  scale_x_continuous(trans = "reverse", limits = c(0, -4), breaks = c(-4, -3, -2, -1, 0) , labels = c("<0.0001", "0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+})
+
+# Combine summaries from the fGSEA
+# cellreg.cluster.DE.fgsea_summary <- cellreg.cluster.DE.fgsea[[1]] %>% mutate(cluster = 0) %>% filter(pval == "nothing")
+# 
+# for(i in 1:length(cellreg.cluster.DE.fgsea)){
+#   print(i)
+#   cellreg.cluster.DE.fgsea_summary <- rbind(
+#     cellreg.cluster.DE.fgsea_summary, 
+#     cellreg.cluster.DE.fgsea[[i]] %>% mutate(cluster = i-1)
+#     )
+# }
+
+if(export){
+cellreg.cluster.DE.fgsea_summary %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_clusters_fgsea.csv"), row.names = FALSE)
+}
+
+```
+
+## Heatmap Cluster NES
+```{r}
+# Using pseudocounts of 0.001
+colfunc <- colorRampPalette(c("blue", "white", "red"))
+
+cellreg.cluster.DE.fgsea_summary %>% mutate(NES = ifelse(padj < 0.2, NES, 0)) %>% left_join(msigdb_hallmarks_names) %>% select(name, NES, cluster) %>% pivot_wider(values_from = NES, names_from = name) %>% column_to_rownames("cluster") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix() %>% pheatmap(col=colfunc(11))
+```
+# Gene signatures
+```{r}
+# Plotting signature 
+EMT_signature <- c("EZH", "JUN", "VIM", "STEAP1", "SOX4", "MMP14", "SHH", "TIMP1", "ZEB1", "ZEB2", "SNAI2")
+
+EMT_signature <- EMT_signature[EMT_signature %in% rownames(scRNA_regcycle@assays$RNA)]
+
+
+M_markers <- c("ITGB5", "ITGB1", "ITGA5", "ITGA10", "IGFBP4", "FN1", "DSC2", "CXCL1","CTNNB1", "BMP4", "BCL2L1")
+
+M_markers <- M_markers[M_markers %in% rownames(scRNA_regcycle@assays$RNA)]
+
+CIN_signature <- c('PELI2','BMP2','SHH','TNS4','RAB3B','ROBO1','ARHGAP28','CHN2','CST1','F13A1','CPVL','SEMA6D','NHSL2','GTF2IP7','DPYSL3','PCDH7','KHDRBS3','TRAC','TMEM156', 'CST4','CD24','FGF5','NTN4')
+
+CIN_signature <- CIN_signature[CIN_signature %in% rownames(scRNA_regcycle@assays$RNA)]
+
+```
+
+# Plotting CIN high cluster signatures
+```{r}
+scRNA_regcycle@meta.data <- scRNA_regcycle@meta.data %>% mutate(
+  cluster_3comp = ifelse(clusterID %in% c(3), as.character(clusterID), "Others"),
+  cluster_1comp = ifelse(clusterID %in% c(1), as.character(clusterID), "Others"),
+)
+```
+
+```{r}
+Idents(scRNA_regcycle) <- "cluster_3comp"
+plot_cluster_split_violin(object = scRNA_regcycle, id1 = 3, id2 = "Others", gene_list = EMT_signature)
+
+plot_cluster_split_violin(object = scRNA_regcycle, id1 = 3, id2 = "Others", gene_list = M_markers)
+
+plot_cluster_split_violin(object = scRNA_regcycle, id1 = 3, id2 = "Others", gene_list = CIN_signature)
+
+Idents(scRNA_regcycle) <- "cluster_1comp"
+plot_cluster_split_violin(object = scRNA_regcycle, id1 = 1, id2 = "Others", gene_list = EMT_signature)
+
+plot_cluster_split_violin(object = scRNA_regcycle, id1 = 1, id2 = "Others", gene_list = M_markers)
+
+plot_cluster_split_violin(object = scRNA_regcycle, id1 = 1, id2 = "Others", gene_list = CIN_signature)
+```
+
+# Export
+```{r}
+if(export){
+saveRDS(scRNA_regcycle, file = paste0(source.output.dir, "/Bakhoum_scRNA_cellreg.rds"))
+  
+cellreg.cluster.DE %>% write.csv2(file = paste0(source.output.dir, "/Bakhoum_scRNA_cellreg_cluster_markers.csv"), row.names = FALSE)
+
+cellreg.CIN.DE %>% write.csv2(file = paste0(source.output.dir, "/Bakhoum_scRNA_cellreg_CIN_cluster_markers.csv"), row.names = FALSE)
+
+# Export data for pre ranked GSEA
+# Convert p-values of zero to 1e-300, then calculate the preranking statistic and export
+cellreg.CIN.DE %>% mutate(
+  p_val = ifelse(p_val == 0, 1e-300, p_val),
+  signlogFC_pval = sign(avg_log2FC) * -log10(p_val)
+  ) %>% select(gene, signlogFC_pval) %>% rename("NAME" = gene) %>% 
+  write.table(file = paste0(source.output.dir, "/Bakhoum_scRNA_cellreg_CIN_Highlow_GSEA_pval.rnk"), sep = "\t", row.names = FALSE, quote = FALSE)
+
+cellreg.CIN.DE %>% select(gene, avg_log2FC) %>% rename("NAME" = gene) %>% write.table(file = paste0(source.output.dir, "/Bakhoum_scRNA_cellreg_CIN_Highlow_GSEA_fc.rnk"), sep = "\t", row.names = FALSE, quote = FALSE)
+
+}
+
+```

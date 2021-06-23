@@ -48,6 +48,9 @@ library(org.Hs.eg.db)
 library(msigdbr)
 # BiocManager::install("fgsea")
 library(fgsea)
+
+set.seed(42)
+export = FALSE
 ```
 
 # Load data
@@ -191,36 +194,6 @@ df.deseq.results %>%
 #   rownames_to_column("gene")
 ```
 
-The results can be plotted in an MA plot:
-
-```{r}
-res %>% 
-  plotMA(ylim=c(-5,5))
-
-# MA plot on shrunken Log2 Fold Changes, also removes the ones with low counts
-resLFC  %>% 
-  plotMA(ylim=c(-5,5))
-```
-
-Draw an histogram of the p-values and the adjusted p-values
-
-```{r}
-# histogram of pvalues
-df.deseq.results %>% 
-  ggplot(aes(pvalue)) + geom_histogram() + labs(
-    title = "DESeq2 p-value distribution", 
-    x = "DESeq2 P-value", 
-    y = "Number of genes"
-  ) +  # you can add two ggplot objects with `+` with the patchwork package
-  df.deseq.results %>% 
-  ggplot(aes(padj)) + geom_histogram() + labs(
-    title = "DESeq2 Adjusted p-value distribution", 
-    x = "DESeq2 adjusted P-value", 
-    y = "Number of genes"
-  )
- # histogram of adj pvalues
-```
-
 ## Volcano plot
 ```{r}
 alpha = 1e-15
@@ -248,10 +221,6 @@ geom_text_repel(
 
 ```
 ```{r}
-  # filter
-df.deseq.results %>%
-  filter(within_threshold == TRUE) %>% nrow()
-
 df.deseq.results %>%
   filter(within_threshold == TRUE) %>%
   arrange(-log2FoldChange, padj) %>% head()
@@ -283,30 +252,6 @@ rm(all_gene_sets)
 
 ```
 
-# FGSEA Shrunk LFC
-```{r}
-CIN_fc_rnk <- df.deseq.results %>% select(gene, log2FoldChange) %>% deframe()
-
-fgseaRes <- fgsea(pathways = msigdb_hallmarks_set, 
-                  stats    = CIN_fc_rnk,
-                  minSize  = 15,
-                  maxSize  = 500)
-
-fgseaRes <- fgseaRes %>% mutate(within_threshold = pval < 0.05, "Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low")) %>% left_join(msigdb_hallmarks_names)
-
-
-fgseaRes %>% mutate(pval = ifelse(pval < 0.00001, 0.0000101, pval)) %>% ggplot(aes(x = log10(pval), y = NES)) +
-  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
-  geom_hline(yintercept = 0, col = "black") +
-  geom_text_repel(
-  aes(x = log10(pval), y = NES, label = name), data = fgseaRes %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
-  ) +
-  labs(x = "log10(pval)", y = "Normalized Enrichment Score", col = "Enriched in") + 
-  scale_y_continuous(limits = c(-2,2), breaks = seq(-2,2,1)) + 
-  scale_x_continuous(trans = "reverse", limits = c(0, -5), breaks = c(-5, -4, -3, -2, -1, 0) , labels = c("<0.00001", "0.0001", "0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
-
-```
-
 # FGSEA not shrunk LFC
 ```{r}
 CIN_fc_rnk <- df.deseq.results.noLFC %>% select(gene, log2FoldChange) %>% deframe()
@@ -335,7 +280,7 @@ fgseaRes.noLFC %>% ggplot(aes(x = log10(pval), y = NES)) +
   aes(x = log10(pval), y = NES, label = name), data = fgseaRes.noLFC %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
   ) +
   labs(x = "log10(pval)", y = "Normalized Enrichment Score", col = "Enriched in") + 
-  scale_y_continuous(limits = c(-3,3), breaks = seq(-3,3,1)) + 
+  scale_y_continuous(limits = c(-2,2), breaks = seq(-2,2,1)) + 
   scale_x_continuous(trans = "reverse") + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
 
 ```
@@ -377,49 +322,42 @@ GSEA_comp <- Bulk_gsea %>% select(NAME, NES, FDR.q.val) %>% rename(orig_NES = NE
   msigdb_hallmarks_names %>% rename(NAME = pathway)
   ) %>% mutate(sign_agreement = sign(orig_NES) == sign(NES))
 
-GSEA_comp %>% ggplot(aes(x = orig_NES, y = NES, col = log(FDR.q.val))) + 
-  geom_point() + geom_abline(slope = 1) + 
+GSEA_comp %>% ggplot(aes(x = orig_NES, y = NES, col = log10(FDR.q.val), shape = FDR.q.val < 0.2)) + 
+  geom_point(size = 2) + geom_abline(slope = 1) + 
   geom_text_repel(
     aes(x = orig_NES, y = NES, label = name), data = GSEA_comp %>% filter(!sign_agreement), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
   ) + labs(x = "Orig GSEA NES", y = "GSEA NES") +
-  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -2)
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -1)
 
 ```
-# Compare FGSEA and original GSEA NES
 ```{r}
-# fGSEA x original GSEA
-fGSEA_comp <- Bulk_gsea %>% select(NAME, NES, FDR.q.val) %>% rename(orig_NES = NES, orig_FDR.q.val = FDR.q.val) %>% left_join(
-  fgseaRes %>% select(pathway, NES, pval) %>% rename(NAME = pathway)
-  ) %>% 
-  left_join(
-  msigdb_hallmarks_names %>% rename(NAME = pathway)
-  ) %>% mutate(sign_agreement = sign(orig_NES) == sign(NES))
-
-fGSEA_comp %>% ggplot(aes(x = orig_NES, y = NES, col = log(pval))) + 
-  geom_point() + geom_abline(slope = 1) + 
-  geom_text_repel(
-    aes(x = orig_NES, y = NES, label = name), data = fGSEA_comp %>% filter(!sign_agreement), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
-  ) + labs(x = "Orig GSEA NES", y = "fGSEA NES") +
-  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -3)
-
+# Compare GSEA FDRq values
+GSEA_comp %>% ggplot(aes(x=orig_FDR.q.val, y= FDR.q.val, col = NES)) + geom_point() + geom_abline(slope = 1)  +
+  scale_color_gradient2(low="blue", mid = "white", high="red", midpoint = 0)
 ```
+
 # Compare not shrunk FGSEA and original GSEA NES
 ```{r}
 # fGSEA x Bulk
 fGSEA_comp <- Bulk_gsea %>% select(NAME, NES, FDR.q.val) %>% rename(orig_NES = NES, orig_FDR.q.val = FDR.q.val) %>% left_join(
-  fgseaRes.noLFC %>% select(pathway, NES, pval) %>% rename(NAME = pathway)
+  fgseaRes.noLFC %>% select(pathway, NES, padj) %>% rename(NAME = pathway)
   ) %>% 
   left_join(
   msigdb_hallmarks_names %>% rename(NAME = pathway)
   ) %>% mutate(sign_agreement = sign(orig_NES) == sign(NES))
 
-fGSEA_comp %>% ggplot(aes(x = orig_NES, y = NES, col = log(pval))) + 
-  geom_point() + geom_abline(slope = 1) + 
+fGSEA_comp %>% ggplot(aes(x = orig_NES, y = NES, col = log10(padj), shape = padj < 0.2)) + 
+  geom_point(size = 2) + geom_abline(slope = 1) + 
   geom_text_repel(
     aes(x = orig_NES, y = NES, label = name), data = fGSEA_comp %>% filter(!sign_agreement), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
   ) + labs(x = "Orig GSEA NES", y = "fGSEA NES") +
-  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -3)
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -1)
 
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
 ```
 
 

@@ -48,6 +48,8 @@ library(gplots)
 
 select = dplyr::select
 rename = dplyr::rename
+
+set.seed(42)
 ```
 
 # Loading data
@@ -61,12 +63,42 @@ export = FALSE
 source.output.dir <- file.path("output_cellreg")
 
 # if source output dir does not exist, create it
-if (!dir.exists(source.output.dir)) {
-    dir.create(source.output.dir)
-} else{
-  print("Output folder already exists")
+if (export){
+  if (!dir.exists(source.output.dir)) {dir.create(source.output.dir)} else{print("Output folder already exists")}
 }
+```
 
+```{r}
+GeomSplitViolin <- ggproto("GeomSplitViolin", GeomViolin, 
+                           draw_group = function(self, data, ..., draw_quantiles = NULL) {
+  data <- transform(data, xminv = x - violinwidth * (x - xmin), xmaxv = x + violinwidth * (xmax - x))
+  grp <- data[1, "group"]
+  newdata <- plyr::arrange(transform(data, x = if (grp %% 2 == 1) xminv else xmaxv), if (grp %% 2 == 1) y else -y)
+  newdata <- rbind(newdata[1, ], newdata, newdata[nrow(newdata), ], newdata[1, ])
+  newdata[c(1, nrow(newdata) - 1, nrow(newdata)), "x"] <- round(newdata[1, "x"])
+
+  if (length(draw_quantiles) > 0 & !scales::zero_range(range(data$y))) {
+    stopifnot(all(draw_quantiles >= 0), all(draw_quantiles <=
+      1))
+    quantiles <- ggplot2:::create_quantile_segment_frame(data, draw_quantiles)
+    aesthetics <- data[rep(1, nrow(quantiles)), setdiff(names(data), c("x", "y")), drop = FALSE]
+    aesthetics$alpha <- rep(1, nrow(quantiles))
+    both <- cbind(quantiles, aesthetics)
+    quantile_grob <- GeomPath$draw_panel(both, ...)
+    ggplot2:::ggname("geom_split_violin", grid::grobTree(GeomPolygon$draw_panel(newdata, ...), quantile_grob))
+  }
+  else {
+    ggplot2:::ggname("geom_split_violin", GeomPolygon$draw_panel(newdata, ...))
+  }
+})
+
+geom_split_violin <- function(mapping = NULL, data = NULL, stat = "ydensity", position = "identity", ..., 
+                              draw_quantiles = NULL, trim = TRUE, scale = "area", na.rm = FALSE, 
+                              show.legend = NA, inherit.aes = TRUE) {
+  layer(data = data, mapping = mapping, stat = stat, geom = GeomSplitViolin, 
+        position = position, show.legend = show.legend, inherit.aes = inherit.aes, 
+        params = list(trim = trim, scale = scale, draw_quantiles = draw_quantiles, na.rm = na.rm, ...))
+}
 ```
 
 # Regress cell cycle scores during data scaling
@@ -106,7 +138,7 @@ scRNA_regcycle@meta.data <- scRNA_regcycle@meta.data %>% mutate(CIN_status = ife
 
 ```
 
-## Perform PCA
+# Perform PCA
 ```{r}
 # Perform PCA
 scRNA_regcycle <- RunPCA(scRNA_regcycle, features = VariableFeatures(object = scRNA_regcycle), npcs = 200)
@@ -154,7 +186,7 @@ RidgePlot(scRNA_regcycle, features = c("PCNA", "TOP2A", "MCM6", "MKI67"), ncol =
 Idents(scRNA_regcycle) <- "orig.ident"
 RidgePlot(scRNA_regcycle, features = c("PCNA", "TOP2A", "MCM6", "MKI67"), ncol = 2)
 ```
-## Run UMAP and TSNE
+# Run UMAP and TSNE
 ```{r}
 # This is not using the cell cycle regressed data! the visualization looks the same as before
 
@@ -180,7 +212,7 @@ scRNA_regcycle <- RunTSNE(scRNA_regcycle, dims.use = 1:200, reduction.use = "pca
 
 ```
 
-## Clustering cells
+# Clustering cells
 ```{r}
 # Clustering cells
 scRNA_regcycle <- FindNeighbors(scRNA_regcycle, dims = 1:200)
@@ -207,20 +239,7 @@ table(scRNA_regcycle$clusterID, scRNA_regcycle$CIN_status) %>% as.data.frame() %
 
 ```
 
-```{r}
-prop.table(table(scRNA_regcycle$Phase, scRNA_regcycle$clusterID), margin = 2)
-
-prop.table(table(scRNA_regcycle$CIN_status, scRNA_regcycle$clusterID), margin = 2)
-
-cluster_assignment <- prop.table(table(scRNA_regcycle$CIN_status, scRNA_regcycle$clusterID), margin = 2) %>% as.data.frame() %>% rename("CIN_status" = Var1, "cluster" = Var2)
-
-cluster_assignment$CIN_status <- gsub("-", "_", cluster_assignment$CIN_status)
-
-cluster_assignment <- cluster_assignment %>% pivot_wider(values_from = Freq, names_from = CIN_status) %>% mutate(CIN_status = ifelse(CIN_high < 0.15, "CIN-low", "CIN-high"))
-
-cluster_assignment
-```
-## Visualization
+# Visualization
 ```{r}
 # DimPlot(scRNA_regcycle, reduction = "UMAP_features", group.by = "CIN_status")
 # DimPlot(scRNA_regcycle, reduction = "UMAP_features", group.by = "orig.ident")
@@ -239,7 +258,7 @@ DimPlot(scRNA_regcycle, reduction = "tsne", group.by = "clusterID")
 
 ```
 
-## 3D UMAP
+# 3D UMAP
 ```{r}
 # Visualize what headings are called so that you can extract them to form a dataframe
 Embeddings(object = scRNA_regcycle, reduction = "umap3d") %>% head()
@@ -296,11 +315,13 @@ rm(plot.data)
 
 ```
 
-## Cluster markers
+# Cluster markers
 ```{r}
 # Find cluster markers 
 Idents(scRNA_regcycle) <- "clusterID"
 cellreg.cluster.DE <- FindAllMarkers(scRNA_regcycle, min.pct = 0.05, logfc.threshold = 0)
+
+cellreg.cluster.DE2 <- FindAllMarkers(scRNA_regcycle, min.pct = 0.01, logfc.threshold = 0, pseudocount.use = 0.001)
 
 #cluster.markers
 clustertop10 <- cellreg.cluster.DE %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
@@ -309,33 +330,94 @@ cellreg.cluster.DE %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
 
 ```
 
-## Plotting signatures
+# Gamma Poison
+```{r}
+scRNA_regcycle@meta.data <- scRNA_regcycle@meta.data %>% mutate(
+  cluster_0comp = ifelse(clusterID %in% c(0), as.character(clusterID), "Others"),
+  cluster_1comp = ifelse(clusterID %in% c(1), as.character(clusterID), "Others"),
+  cluster_2comp = ifelse(clusterID %in% c(2), as.character(clusterID), "Others"),
+  cluster_3comp = ifelse(clusterID %in% c(3), as.character(clusterID), "Others"),
+  cluster_4comp = ifelse(clusterID %in% c(4), as.character(clusterID), "Others"),
+  cluster_5comp = ifelse(clusterID %in% c(5), as.character(clusterID), "Others"),
+  cluster_6comp = ifelse(clusterID %in% c(6), as.character(clusterID), "Others"),
+)
+
+fit_cluster0 <- glm_gp(as.matrix(counts), design = scRNA_regcycle@meta.data$cluster_0comp)
+saveRDS(fit_cluster0, "CIN_glmGamPoi_cellreg_cluster0.rds")
+
+fit_cluster1 <- glm_gp(as.matrix(counts), design = scRNA_regcycle@meta.data$cluster_1comp)
+saveRDS(fit_cluster1, "CIN_glmGamPoi_cellreg_cluster1.rds")
+
+fit_cluster2 <- glm_gp(as.matrix(counts), design = scRNA_regcycle@meta.data$cluster_2comp)
+saveRDS(fit_cluster2, "CIN_glmGamPoi_cellreg_cluster2.rds")
+
+fit_cluster3 <- glm_gp(as.matrix(counts), design = scRNA_regcycle@meta.data$cluster_3comp)
+saveRDS(fit_cluster3, "CIN_glmGamPoi_cellreg_cluster3.rds")
+
+fit_cluster4 <- glm_gp(as.matrix(counts), design = scRNA_regcycle@meta.data$cluster_4comp)
+saveRDS(fit_cluster4, "CIN_glmGamPoi_cellreg_cluster4.rds")
+
+fit_cluster5 <- glm_gp(as.matrix(counts), design = scRNA_regcycle@meta.data$cluster_5comp)
+saveRDS(fit_cluster5, "CIN_glmGamPoi_cellreg_cluster5.rds")
+
+fit_cluster6 <- glm_gp(as.matrix(counts), design = scRNA_regcycle@meta.data$cluster_6comp)
+saveRDS(fit_cluster6, "CIN_glmGamPoi_cellreg_cluster6.rds")
+
+res_cluster0 <- test_de(fit_cluster0, contrast = `0` - `Others`)
+res_cluster1 <- test_de(fit_cluster1, contrast = `1` - `Others`)
+res_cluster2 <- test_de(fit_cluster2, contrast = `2` - `Others`)
+res_cluster3 <- test_de(fit_cluster3, contrast = `3` - `Others`)
+res_cluster4 <- test_de(fit_cluster4, contrast = `4` - `Others`)
+res_cluster5 <- test_de(fit_cluster5, contrast = `5` - `Others`)
+res_cluster6 <- test_de(fit_cluster6, contrast = `6` - `Others`)
+
+cellreg_gampoi_cluster <- rbind(
+  res_cluster0 %>% mutate(comp = "0 x Others"),
+  res_cluster1 %>% mutate(comp = "1 x Others"),
+  res_cluster2 %>% mutate(comp = "2 x Others"),
+  res_cluster3 %>% mutate(comp = "3 x Others"),
+  res_cluster4 %>% mutate(comp = "4 x Others"),
+  res_cluster5 %>% mutate(comp = "5 x Others"),
+  res_cluster6 %>% mutate(comp = "6 x Others")
+  )
+
+cellreg_gampoi_cluster %>% write.csv2(file = "cellreg_gampoi_cluster_comparisons.csv", row.names = FALSE)
+
+cellreg.cluster.DE.gampoi <- read.csv2(file = paste0(source.output.dir, "/cellreg_gampoi_cluster_comparisons.csv"))
+
+cellreg.cluster.DE.gampoi %>% ggplot(aes(x = lfc)) + geom_histogram()
+
+cellreg.cluster.DE.gampoi %>% filter(abs(lfc) < 1e6) %>% ggplot(aes(x = lfc)) + geom_histogram()
+
+```
+
+# Plotting signatures
+## EMT 
 ```{r}
 Idents(scRNA_regcycle) <- "clusterID"
 
 # Plotting EMT signature 
-EMT_signature <- c("VIM", "ZEB2", "SNAI2", "ZEB1")
+EMT_signature <- c("EZH", "JUN", "VIM", "STEAP1", "SOX4", "MMP14", "SHH", "TIMP1", "ZEB1", "ZEB2", "SNAI2")
+# FeaturePlot(scRNA_regcycle, features = EMT_signature)
 
-VlnPlot(scRNA_regcycle, features = EMT_signature)
-FeaturePlot(scRNA_regcycle, features = EMT_signature)
-
-EMT_signature2 <- c("EZH", "JUN", "VIM", "STEAP1", "SOX4", "MMP14", "SHH", "TIMP1", "ZEB1")
-
-EMT_signature2 <- EMT_signature2[EMT_signature2 %in% rownames(scRNA_regcycle@assays$RNA)]
+EMT_signature <- EMT_signature[EMT_signature %in% rownames(scRNA_regcycle@assays$RNA)]
 
 Idents(scRNA_regcycle) <- "clusterID"
-for(i in 1:length(EMT_signature2)){
-p <- VlnPlot(scRNA_regcycle, features = EMT_signature2[i])
+for(i in 1:length(EMT_signature)){
+p <- VlnPlot(scRNA_regcycle, features = EMT_signature[i])
 print(p)
 }
 
 ```
-
+## M signature 
 ```{r}
 # Plotting Genes enriched in the "M" Population from Bakhoum et al
-M_markers = c("ITGB5", "ITGB1", "ITGA5", "ITGA10", "IGFBP4", "FN1", "DSC2", "CXCL1","CTNNB1", "BMP4", "BCL2L1")
+M_markers <- c("ITGB5", "ITGB1", "ITGA5", "ITGA10", "IGFBP4", "FN1", "DSC2", "CXCL1","CTNNB1", "BMP4", "BCL2L1", "VIM", "TIMP1", "TGFBR2", "TGFBI", "TGFB1", "PPARG", "NUPR1", "MSN", "LMCD1", "LEF1", "JAG1")
+
+M_markers <- M_markers[M_markers %in% rownames(scRNA_regcycle@assays$RNA)]
 
 Idents(scRNA_regcycle) <- "clusterID"
+
 for(i in 1:length(M_markers)){
 p <- VlnPlot(scRNA_regcycle, features = M_markers[i])
 print(p)
@@ -343,22 +425,151 @@ print(p)
 # print(p)
 }
 ```
-
+## CIN signature 
 ```{r}
 # Plot CIN signature from Bakhoum et al 2018 (Supp. table 5), comparing CIN high and CIN low
 CIN_signature <- c('PELI2','BMP2','SHH','TNS4','RAB3B','ROBO1','ARHGAP28','CHN2','CST1','F13A1','CPVL','SEMA6D','NHSL2','GTF2IP7','DPYSL3','PCDH7','KHDRBS3','TRAC','TMEM156', 'CST4','CD24','FGF5','NTN4')
 
-CIN_present <- CIN_signature %in% rownames(scRNA_regcycle@assays$RNA)
+CIN_signature <- CIN_signature[CIN_signature %in% rownames(scRNA_regcycle@assays$RNA)]
 
 Idents(scRNA_regcycle) <- "clusterID"
-for(i in 1:length(CIN_present)){
-p <- VlnPlot(scRNA_regcycle, features = CIN_signature[CIN_present][i])
+for(i in 1:length(CIN_signature)){
+p <- VlnPlot(scRNA_regcycle, features = CIN_signature[i])
 print(p)
 }
 
 ```
 
-## CIN DE
+## Plotting CIN high cluster signatures
+```{r}
+scRNA_regcycle@meta.data <- scRNA_regcycle@meta.data %>% mutate(
+  cluster_3comp = ifelse(clusterID %in% c(3), as.character(clusterID), "Others"),
+  cluster_1comp = ifelse(clusterID %in% c(1), as.character(clusterID), "Others"),
+  cluster_1_3comp = ifelse(clusterID %in% c(1,3), as.character(clusterID), "Others*")
+)
+
+Idents(scRNA_regcycle) <- ""
+
+
+# Cluster 3
+VlnPlot(scRNA_regcycle, features = EMT_signature, split.plot = TRUE, split.by = "cluster_3comp", flip = TRUE, stack = TRUE) + labs(title = "EMT signature") + theme(plot.title = element_text(hjust = 0.5))
+
+VlnPlot(scRNA_regcycle, features = M_markers, split.plot = TRUE, split.by = "cluster_3comp", flip = TRUE, stack = TRUE) + labs(title = "M signature") + theme(plot.title = element_text(hjust = 0.5))
+
+VlnPlot(scRNA_regcycle, features = CIN_signature, split.plot = TRUE, split.by = "cluster_3comp", flip = TRUE, stack = TRUE) + labs(title = "CIN signature") + theme(plot.title = element_text(hjust = 0.5))
+
+# Cluster 1
+VlnPlot(scRNA_regcycle, features = EMT_signature, split.plot = TRUE, split.by = "cluster_1comp", flip = TRUE, stack = TRUE) + labs(title = "EMT signature") + theme(plot.title = element_text(hjust = 0.5))
+
+VlnPlot(scRNA_regcycle, features = M_markers, split.plot = TRUE, split.by = "cluster_1comp", flip = TRUE, stack = TRUE) + labs(title = "M signature") + theme(plot.title = element_text(hjust = 0.5))
+
+VlnPlot(scRNA_regcycle, features = CIN_signature, split.plot = TRUE, split.by = "cluster_1comp", flip = TRUE, stack = TRUE) + labs(title = "CIN signature") + theme(plot.title = element_text(hjust = 0.5))
+```
+## Split violins
+```{r}
+# Plot gene expression of CIN high x low cells
+plot_cluster_split_violin <- function(object, id1, id2, gene_list){
+
+  # Subset data
+  id_1 <- subset(object, idents = id1)
+  id_2 <- subset(object, idents = id2)
+
+  # Get expression data of relevant genes as a data frame
+  mat <- Seurat::GetAssayData(id_1, assay = "RNA")
+  mat <- mat[rownames(mat) %in% gene_list, ]
+  df1 <- mat %>% t() %>% as.data.frame() %>% mutate(cluster = id1)
+
+  mat <- Seurat::GetAssayData(id_2, assay = "RNA")
+  mat <- mat[rownames(mat) %in% gene_list, ]
+  df2 <- mat %>% t() %>% as.data.frame() %>% mutate(cluster = id2)
+
+  # Combine data from both IDs
+  df_c <- df1 %>% rbind(df2)
+  df_c <- df_c %>% pivot_longer(cols = gene_list, names_to = "gene", values_to = "value")
+    
+  # Plot
+  plot <- df_c %>% mutate(dummy = "dummy") %>% ggplot(aes(x = dummy, y = value, fill = as.factor(cluster))) + geom_split_violin() + facet_wrap(~gene, scales = "free_x") + coord_flip() + labs(x = "", y = "Expression", title = deparse(substitute(gene_list))) +  theme(plot.title = element_text(hjust = 0.5))
+  print(plot)
+  
+  # Z score and plot
+  df_z <- df_c %>% group_by(gene) %>% mutate(Z_scored_value = (value-mean(value))/sd(value), dummy = "dummy")
+# group_by(cluster, gene)
+  zplot <- df_z %>% ggplot(aes(x = dummy, y = Z_scored_value, fill = as.factor(cluster))) + geom_split_violin() + facet_wrap(~gene, scales = "free_x") + coord_flip() + labs(x = "", y = "Z-scored expression", title = deparse(substitute(gene_list))) +  theme(plot.title = element_text(hjust = 0.5))
+  print(zplot)
+}
+```
+
+
+```{r}
+Idents(scRNA_regcycle) <- "cluster_3comp"
+
+plot_cluster_split_violin(object = scRNA_regcycle, id1 = 3, id2 = "Others", gene_list = EMT_signature)
+
+plot_cluster_split_violin(object = scRNA_regcycle, id1 = 3, id2 = "Others", gene_list = M_markers)
+
+plot_cluster_split_violin(object = scRNA_regcycle, id1 = 3, id2 = "Others", gene_list = CIN_signature)
+```
+
+```{r}
+# Exclude cluster 1 from "Others" group
+Idents(scRNA_regcycle) <- "cluster_1_3comp"
+
+plot_cluster_split_violin(object = scRNA_regcycle, id1 = 3, id2 = "Others*", gene_list = EMT_signature)
+
+plot_cluster_split_violin(object = scRNA_regcycle, id1 = 3, id2 = "Others*", gene_list = M_markers)
+
+plot_cluster_split_violin(object = scRNA_regcycle, id1 = 3, id2 = "Others*", gene_list = CIN_signature)
+```
+
+```{r}
+# Exclude cluster 1 from "Others" group
+Idents(scRNA_regcycle) <- "cluster_1_3comp"
+
+plot_cluster_split_violin(object = scRNA_regcycle, id1 = 3, id2 = "Others*", gene_list = EMT_signature)
+
+plot_cluster_split_violin(object = scRNA_regcycle, id1 = 3, id2 = "Others*", gene_list = M_markers)
+
+plot_cluster_split_violin(object = scRNA_regcycle, id1 = 3, id2 = "Others*", gene_list = CIN_signature)
+```
+
+
+```{r}
+# Exclude cluster 3 from "Others" group
+Idents(scRNA_regcycle) <- "cluster_1_3comp"
+
+plot_cluster_split_violin(object = scRNA_regcycle, id1 = 1, id2 = "Others*", gene_list = EMT_signature)
+
+plot_cluster_split_violin(object = scRNA_regcycle, id1 = 1, id2 = "Others*", gene_list = M_markers)
+
+plot_cluster_split_violin(object = scRNA_regcycle, id1 = 1, id2 = "Others*", gene_list = CIN_signature)
+```
+
+```{r}
+id_1 <- subset(scRNA_regcycle, idents = 3)
+id_2 <- subset(scRNA_regcycle, idents = 1)
+
+# Get expression data of relevant genes as a data frame
+mat <- Seurat::GetAssayData(id_1, assay = "RNA")
+mat <- mat[rownames(mat) %in% M_markers, ]
+df1 <- mat %>% t() %>% as.data.frame() %>% mutate(cluster = 3)
+
+mat <- Seurat::GetAssayData(id_2, assay = "RNA")
+mat <- mat[rownames(mat) %in% M_markers, ]
+df2 <- mat %>% t() %>% as.data.frame() %>% mutate(cluster = 1)
+
+# Combine data from both IDs
+df_c <- df1 %>% rbind(df2)
+df_c <- df_c %>% pivot_longer(cols = M_markers, names_to = "gene", values_to = "value")
+    
+# Z score and plot
+df_z <- df_c %>% group_by(cluster, gene) %>% mutate(Z_scored_value = (value-mean(value))/sd(value), dummy = "dummy")
+  
+# df_c %>% group_by(cluster, gene) %>% filter(gene == "JUN") %>% summarize(mean = mean(value), sd = sd(value), Z = (value - mean)/sd)
+  df_z %>% ggplot(aes(x = dummy, y = Z_scored_value, fill = as.factor(cluster))) + geom_split_violin() + facet_wrap(~gene, scales = "free_x") + coord_flip() + labs(x = "", y = "Z-scored expression", title = deparse(substitute(gene_list))) +  theme(plot.title = element_text(hjust = 0.5))
+  
+  df_c %>% mutate(dummy = "dummy") %>% ggplot(aes(x = dummy, y = value, fill = as.factor(cluster))) + geom_split_violin() + facet_wrap(~gene, scales = "free_x") + coord_flip() + labs(x = "", y = "Expression", title = deparse(substitute(gene_list))) +  theme(plot.title = element_text(hjust = 0.5))
+```
+# CIN DE
 ```{r}
 # Plot gene expression of CIN high x low cells
 Idents(scRNA_regcycle) <- "CIN_status"
@@ -371,10 +582,6 @@ CIN_low <- subset(scRNA_regcycle, idents = "CIN-low")
 avg.CINhigh.cells <- as.data.frame(AverageExpression(CIN_high, verbose = FALSE)$RNA) %>% rename("CIN_high" = all) %>% rownames_to_column("gene")
 
 avg.CINlow.cells <- as.data.frame(AverageExpression(CIN_low, verbose = FALSE)$RNA) %>% rename("CIN_low" = all) %>% rownames_to_column("gene")
-
-
-# Plot CIN high x cin low pseudocounts in log space
-avg.CINhigh.cells %>% full_join(avg.CINlow.cells, by = "gene") %>% ggplot(aes(x = CIN_low, y = CIN_high)) + geom_point() + scale_y_continuous(trans = "log1p") + scale_x_continuous(trans = "log1p")
 
 # avg.CINhigh.cells %>% full_join(avg.CINlow.cells, by = "gene") %>% mutate(fc = (CIN_high + 1)/(CIN_low + 1), log2fc = log2(fc)) %>% filter(gene %in% c("LAPTM5", "MARCKSL1", "HLA-B"))
 
@@ -400,7 +607,7 @@ cellreg.CIN.DE %>% left_join(CIN_signature_df) %>% filter(Bakhoum_gene_sig)
 #CIN.cluster.markers %>% filter(str_detect(gene, "BMP2"))
 ```
 
-## Load msigdb hallmarks gene set
+# Load msigdb hallmarks gene set
 ```{r}
 all_gene_sets <- msigdbr("Homo sapiens")
 
@@ -417,9 +624,23 @@ rm(all_gene_sets)
 
 ```
 
-## FGSEA DE between clusters
 ```{r}
-cellreg.cluster.DE.l <- cellreg.cluster.DE %>% select(gene, cluster, avg_log2FC) %>% split(f = cellreg.cluster.DE$cluster)
+cellreg.cluster.DE2 %>% filter(pct.1 >= 0.05) %>% select(gene, cluster, avg_log2FC)
+cellreg.cluster.DE2 %>% filter(pct.1 >= 0.05) %>% select(gene, cluster, avg_log2FC) %>% filter(cluster == 4)
+
+cellreg.cluster.DE2 %>% filter(pct.1 >= 0.05) %>% mutate(cluster = as.character(cluster)) %>% select(gene, cluster, avg_log2FC)  %>% filter(cluster == "4")
+
+cellreg.cluster.DE2 %>% filter(pct.1 >= 0.05) %>% mutate(cluster = as.character(cluster)) %>% select(gene, cluster, avg_log2FC) %>% ungroup() %>% split(f = (cellreg.cluster.DE2%>% filter(pct.1 >= 0.05))$cluster)
+
+cellreg.cluster.DE2$cluster[cellreg.cluster.DE2$cluster == 4]
+```
+
+# FGSEA DE between clusters
+```{r}
+cellreg.cluster.DE.l <- cellreg.cluster.DE2 %>% select(gene, cluster, avg_log2FC) %>% split(f = cellreg.cluster.DE2$cluster)
+
+# cellreg.cluster.DE.l <- cellreg.cluster.DE2 %>% filter(pct.1 >= 0.05) %>% select(gene, cluster, avg_log2FC) %>% split(f = (cellreg.cluster.DE2%>% filter(pct.1 >= 0.05))$cluster)
+
 
 cellreg.cluster.DE.fgsea <- cellreg.cluster.DE.l %>% lapply(FUN = function(x){
   x <- x %>% select(-cluster) %>% deframe()
@@ -433,23 +654,22 @@ cellreg.cluster.DE.fgsea <- cellreg.cluster.DE.l %>% lapply(FUN = function(x){
 # Plot results for the GSEA on each cluster 
 lapply(seq_along(cellreg.cluster.DE.fgsea), FUN = function(i){
   cellreg.cluster.DE.fgsea[[i]] <- cellreg.cluster.DE.fgsea[[i]] %>% mutate(
-    within_threshold = pval < 0.05, 
-    pval = ifelse(pval < 0.0001, 0.000101, pval)
+    within_threshold = padj < 0.2, 
+    padj = ifelse(padj < 0.0001, 0.000101, padj)
     ) %>% left_join(msigdb_hallmarks_names)
 
-  cellreg.cluster.DE.fgsea[[i]] %>% ggplot(aes(x = log10(pval), y = NES)) +
+  cellreg.cluster.DE.fgsea[[i]] %>% ggplot(aes(x = log10(padj), y = NES)) +
   geom_point(aes(size = 0.5, alpha = 0.3, col = as.factor(sign(NES)))) + 
   geom_hline(yintercept = 0, col = "black") +
   geom_text_repel(
-  aes(x = log10(pval), y = NES, label = name), data = cellreg.cluster.DE.fgsea[[i]] %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+  aes(x = log10(padj), y = NES, label = name), data = cellreg.cluster.DE.fgsea[[i]] %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
   ) +
-  labs(x = "log10(pval)", y = "Normalized Enrichment Score", col = "Enriched in Cluster", title = paste("Cluster: ", i - 1, sep = "")) + 
+  labs(x = "log10(FDR.q)", y = "Normalized Enrichment Score", col = "Enriched in Cluster", title = paste("Cluster: ", i - 1, sep = "")) + 
   scale_y_continuous(limits = c(-3,3), breaks = seq(-3,3,1)) + 
   scale_x_continuous(trans = "reverse", limits = c(0, -4), breaks = c(-4, -3, -2, -1, 0) , labels = c("<0.0001", "0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
 })
 
-
-# Combine summaries from the GO enrichment tests
+# Combine summaries from the fGSEA
 cellreg.cluster.DE.fgsea_summary <- cellreg.cluster.DE.fgsea[[1]] %>% mutate(cluster = 0) %>% filter(pval == "nothing")
 
 for(i in 1:length(cellreg.cluster.DE.fgsea)){
@@ -464,21 +684,109 @@ if(export){
 cellreg.cluster.DE.fgsea_summary %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster_fgsea.csv"), row.names = FALSE)
 }
 
-cellreg.cluster.DE.fgsea_summary <- read.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster_fgsea.csv"))
+cellreg.cluster.DE.fgsea_summary <- read.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_clusters_fgsea.csv"))
 cellreg.cluster.DE.fgsea <- cellreg.cluster.DE.fgsea_summary %>% split(f = cellreg.cluster.DE.fgsea_summary$cluster)
-
 
 ```
 
 ## Heatmap Cluster NES
 ```{r}
+# Using pseudocounts of 0.001
+colfunc <- colorRampPalette(c("blue", "white", "red"), )
+
+cellreg.cluster.DE.fgsea_summary %>% mutate(NES = ifelse(padj < 0.2, NES, 0)) %>% left_join(msigdb_hallmarks_names) %>% select(name, NES, cluster) %>% pivot_wider(values_from = NES, names_from = name) %>% column_to_rownames("cluster") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix() %>% pheatmap(col=colfunc(11))
+# 
+# cellreg.cluster.DE.fgsea_summary %>% mutate(NES = ifelse(padj < 0.2, NES, 0)) %>% left_join(msigdb_hallmarks_names) %>% select(name, NES, cluster) %>% pivot_wider(values_from = NES, names_from = name)  %>% 
+#   column_to_rownames(var = "cluster") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix() %>%
+#   heatmap.2(col=colfunc(11), dendrogram = "both", trace = "none", srtCol=75)
+
+```
+
+```{r}
+# Using pseudocounts of 1
+cellreg.cluster.DE.fgsea_summary1 <- read.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_clusters_fgsea1.csv"))
+
 colfunc <- colorRampPalette(c("blue", "white", "red"))
 
-cellreg.cluster.DE.fgsea_summary %>% left_join(msigdb_hallmarks_names) %>% select(name, NES, cluster) %>% pivot_wider(values_from = NES, names_from = name) %>% column_to_rownames("cluster") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix() %>% pheatmap(col=colfunc(10))
+cellreg.cluster.DE.fgsea_summary1 %>% mutate(NES = ifelse(padj < 0.2, NES, 0))  %>% left_join(msigdb_hallmarks_names) %>% select(name, NES, cluster) %>% pivot_wider(values_from = NES, names_from = name) %>% column_to_rownames("cluster") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix() %>% pheatmap(col=colfunc(11))
 
-cellreg.cluster.DE.fgsea_summary %>% left_join(msigdb_hallmarks_names) %>% select(name, NES, cluster) %>% pivot_wider(values_from = NES, names_from = name)  %>% 
-  column_to_rownames(var = "cluster") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix() %>%
-  heatmap.2(col=colfunc(10), dendrogram = "both", trace = "none", srtCol=75)
+```
+
+```{r}
+comp <- cellreg.cluster.DE.fgsea_summary %>% select(pathway, NES, cluster)  %>% rename(NES0.001 = NES) %>% left_join(
+cellreg.cluster.DE.fgsea_summary1 %>% select(pathway, NES, cluster) %>% rename(NES1 = NES)
+) %>% left_join(msigdb_hallmarks_names) %>% mutate(sign_disc = sign(NES1) != sign(NES0.001))
+
+comp %>% ggplot(aes(x = NES0.001, y = NES1, color = as.factor(cluster))) + geom_point() + geom_abline(slope =1, alpha = 0.5) + geom_text_repel(aes(x = NES0.001, y = NES1, label = name), data = comp %>% filter(sign_disc) , colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20  )
+
+comp %>% filter(cluster == 3) %>% ggplot(aes(x = NES0.001, y = NES1, color = as.factor(cluster))) + geom_point() + geom_abline(slope =1, alpha = 0.5) + geom_text_repel(aes(x = NES0.001, y = NES1, label = name), data = comp %>% filter(cluster == 3 &sign_disc) , colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20  )
+
+```
+
+# GamPoi FGSEA DE between clusters
+```{r}
+cellreg.cluster.DE.l.gampoi <- cellreg.cluster.DE.gampoi %>% rename("gene" = name, "cluster" = comp) %>% select(gene, cluster, lfc) %>% split(f = cellreg.cluster.DE.gampoi$comp)
+
+# cellreg.cluster.DE.l <- cellreg.cluster.DE2 %>% filter(pct.1 >= 0.05) %>% select(gene, cluster, avg_log2FC) %>% split(f = (cellreg.cluster.DE2%>% filter(pct.1 >= 0.05))$cluster)
+
+cellreg.cluster.DE.fgsea.gampoi <- cellreg.cluster.DE.l.gampoi %>% lapply(FUN = function(x){
+  x <- x %>% select(-cluster) %>% deframe()
+  x <- fgsea(pathways = msigdb_hallmarks_set, 
+                  stats = x,
+                  minSize = 15,
+                  maxSize = 500)
+})
+
+
+# Plot results for the GSEA on each cluster 
+lapply(seq_along(cellreg.cluster.DE.fgsea.gampoi), FUN = function(i){
+  cellreg.cluster.DE.fgsea.gampoi[[i]] <- cellreg.cluster.DE.fgsea.gampoi[[i]] %>% mutate(
+    within_threshold = padj < 0.05, 
+    padj = ifelse(padj < 0.0001, 0.000101, padj)
+    ) %>% left_join(msigdb_hallmarks_names)
+
+  cellreg.cluster.DE.fgsea.gampoi[[i]] %>% ggplot(aes(x = log10(padj), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = as.factor(sign(NES)))) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(padj), y = NES, label = name), data = cellreg.cluster.DE.fgsea.gampoi[[i]] %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) +
+  labs(x = "log10(pval)", y = "Normalized Enrichment Score", col = "Enriched in Cluster", title = paste("Cluster: ", i - 1, sep = "")) + 
+  scale_y_continuous(limits = c(-3,3), breaks = seq(-3,3,1)) + 
+  scale_x_continuous(trans = "reverse", limits = c(0, -4), breaks = c(-4, -3, -2, -1, 0) , labels = c("<0.0001", "0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+})
+
+# Combine summaries from the fGSEA
+cellreg.cluster.DE.fgsea.gampoi_summary <- cellreg.cluster.DE.fgsea.gampoi[[1]] %>% mutate(cluster = 0) %>% filter(pval == "nothing")
+
+for(i in 1:length(cellreg.cluster.DE.fgsea.gampoi)){
+  print(i)
+  cellreg.cluster.DE.fgsea.gampoi_summary <- rbind(
+    cellreg.cluster.DE.fgsea.gampoi_summary, 
+    cellreg.cluster.DE.fgsea.gampoi[[i]] %>% mutate(cluster = i-1)
+    )
+}
+
+cellreg.cluster.DE.fgsea.gampoi_summary %>% select(NES,padj)%>% summary()
+
+if(export){
+cellreg.cluster.DE.fgsea.gampoi_summary %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster_fgsea_gampoi.csv"), row.names = FALSE)
+}
+
+cellreg.cluster.DE.fgsea.gampoi_summary <- read.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster_fgsea_gampoi.csv"))
+
+cellreg.cluster.DE.fgsea.gampoi <- cellreg.cluster.DE.fgsea.gampoi_summary %>% split(f = cellreg.cluster.DE.fgsea_summary$cluster)
+
+```
+
+## Heatmap Cluster NES
+```{r}
+# Using pseudocounts of 0.001
+colfunc <- colorRampPalette(c("blue", "white", "red"), )
+
+cellreg.cluster.DE.fgsea.gampoi_summary%>% left_join(msigdb_hallmarks_names) %>% select(name, NES, cluster) %>% pivot_wider(values_from = NES, names_from = name) %>% column_to_rownames("cluster") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix() %>% pheatmap(col=colfunc(11))
+
+cellreg.cluster.DE.fgsea.gampoi_summary%>% left_join(msigdb_hallmarks_names) %>% ggplot(aes(x = cluster, y = name, fill = NES)) + geom_raster() + scale_fill_gradient2(low="blue", mid="white", high="red")
 
 ```
 
@@ -492,46 +800,29 @@ cellreg.cluster.DE.fgsea %>% lapply(function(x){
 Idents(scRNA_regcycle) <- "clusterID"
 
 cellreg.cluster.DE13 <- FindMarkers(scRNA_regcycle, ident.1 = 1, ident.2 = 3, min.pct = 0.05, logfc.threshold = 0) %>% rownames_to_column("gene") %>% mutate(cluster = "13")
-cellreg.cluster.DE13 %>% write.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster13.csv"), row.names = FALSE)
-cellreg.cluster.DE13 <- read.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster13.csv"))
 
 cellreg.cluster.DE04 <- FindMarkers(scRNA_regcycle, ident.1 = 0, ident.2 = 4, min.pct = 0.05, logfc.threshold = 0) %>% rownames_to_column("gene")  %>% mutate(cluster = "04")
-cellreg.cluster.DE04 %>% write.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster04.csv"), row.names = FALSE)
-cellreg.cluster.DE04 <- read.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster04.csv"))
 
 cellreg.cluster.DE56 <- FindMarkers(scRNA_regcycle, ident.1 = 5, ident.2 = 6, min.pct = 0.05, logfc.threshold = 0) %>% rownames_to_column("gene")  %>% mutate(cluster = "56")
-cellreg.cluster.DE56 %>% write.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster56.csv"), row.names = FALSE)
-cellreg.cluster.DE56 <- read.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster56.csv"))
 
 cellreg.cluster.DE52 <- FindMarkers(scRNA_regcycle, ident.1 = 5, ident.2 = 2, min.pct = 0.05, logfc.threshold = 0) %>% rownames_to_column("gene")  %>% mutate(cluster = "52")
-cellreg.cluster.DE52 %>% write.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster52.csv"), row.names = FALSE)
-cellreg.cluster.DE52 <- read.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster52.csv"))
 
 cellreg.cluster.DE62 <- FindMarkers(scRNA_regcycle, ident.1 = 6, ident.2 = 2, min.pct = 0.05, logfc.threshold = 0) %>% rownames_to_column("gene")  %>% mutate(cluster = "62")
-cellreg.cluster.DE62 %>% write.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster62.csv"), row.names = FALSE)
-cellreg.cluster.DE62 <- read.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster62.csv"))
-
 
 cellreg.cluster.DE10 <- FindMarkers(scRNA_regcycle, ident.1 = 1, ident.2 = 0, min.pct = 0.05, logfc.threshold = 0) %>% rownames_to_column("gene")  %>% mutate(cluster = "10")
-cellreg.cluster.DE10 %>% write.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster10.csv"), row.names = FALSE)
-cellreg.cluster.DE10 <- read.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster10.csv"))
-
 
 cellreg.cluster.DE14 <- FindMarkers(scRNA_regcycle, ident.1 = 1, ident.2 = 4, min.pct = 0.05, logfc.threshold = 0) %>% rownames_to_column("gene")  %>% mutate(cluster = "14")
-cellreg.cluster.DE14 %>% write.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster14.csv"), row.names = FALSE)
-cellreg.cluster.DE14 <- read.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster14.csv"))
-
 
 cellreg.cluster.DE30 <- FindMarkers(scRNA_regcycle, ident.1 = 3, ident.2 = 0, min.pct = 0.05, logfc.threshold = 0) %>% rownames_to_column("gene")  %>% mutate(cluster = "30")
-cellreg.cluster.DE30 %>% write.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster30.csv"), row.names = FALSE)
-cellreg.cluster.DE30 <- read.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster30.csv"))
 
 cellreg.cluster.DE34 <- FindMarkers(scRNA_regcycle, ident.1 = 3, ident.2 = 4, min.pct = 0.05, logfc.threshold = 0) %>% rownames_to_column("gene")  %>% mutate(cluster = "34")
-cellreg.cluster.DE34 %>% write.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster34.csv"), row.names = FALSE)
-cellreg.cluster.DE34 <- read.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_cluster34.csv"))
-
 
 cellreg.specific.clusters <- rbind(cellreg.cluster.DE13, cellreg.cluster.DE04, cellreg.cluster.DE56, cellreg.cluster.DE52, cellreg.cluster.DE62, cellreg.cluster.DE10, cellreg.cluster.DE14, cellreg.cluster.DE30, cellreg.cluster.DE34)
+
+if (export){
+cellreg.specific.clusters %>% write.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_specific_clusters.csv"), row.names = FALSE)
+}
+cellreg.specific.clusters <- read.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_specific_clusters.csv"))
 
 ```
 
@@ -571,7 +862,7 @@ lapply(seq_along(cellreg.specific.clusters.fgsea), FUN = function(i){
   geom_point(aes(size = 0.5, alpha = 0.3, col = as.factor(sign(NES)))) + 
   geom_hline(yintercept = 0, col = "black") +
   geom_text_repel(
-  aes(x = log10(pval), y = NES, label = name), data = cellreg.specific.clusters.fgsea[[i]] %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+  aes(x = log10(pval), y = NES, label = name), data = cellreg.specific.clusters.fgsea[[i]] %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
   ) +
   labs(x = "log10(pval)", y = "Normalized Enrichment Score", col = "Enriched in Cluster", title = paste("Cluster: ", names(cellreg.specific.clusters.fgsea)[[i]], sep = "")) + 
   scale_y_continuous(limits = c(-3,3), breaks = seq(-3,3,1)) + 
@@ -590,12 +881,12 @@ for(i in 1:length(cellreg.specific.clusters.fgsea)){
 }
 
 if(export){
-cellreg.specific.clusters.fgsea_summary %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_specific_cluster_fgsea.csv"), row.names = FALSE)
+cellreg.specific.clusters.fgsea_summary %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_specific_clusters_fgsea.csv"), row.names = FALSE)
 }
 
-cellreg.specific.clusters.fgsea_summary <- read.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_specific_cluster_fgsea.csv"))
+cellreg.specific.clusters.fgsea_summary <- read.csv2(file = paste0(source.output.dir, "/scRNA_cellreg_specific_clusters_fgsea.csv"))
 
-cellreg.specific.clusters.fgsea <- cellreg.specific.clusters.fgsea_summary %>% split(f = cellreg.specific.clusters.fgsea$cluster)
+cellreg.specific.clusters.fgsea <- cellreg.specific.clusters.fgsea_summary %>% split(f = cellreg.specific.clusters.fgsea_summary$cluster)
 
 
 ```
@@ -606,7 +897,7 @@ DimPlot(scRNA_regcycle, reduction = "umap", group.by = "clusterID")
 
 ```
 
-## Entrez ID symbol Mapping
+# Entrez ID symbol Mapping
 ```{r}
 # Map symbols to entrezids using Annotation dbi
 entrez_dbi_map <- cellreg.cluster.DE %>% select(gene) %>% unique()
@@ -625,7 +916,7 @@ entrez_dbi_map %>% filter(!is.na(entrezid)) %>% n_distinct()
 
 ```
 
-## GO BP Enrichment
+# GO BP Enrichment
 ```{r}
 cellreg.cluster.DE.l <- cellreg.cluster.DE %>% select(gene, p_val, cluster, avg_log2FC) %>% split(f = cellreg.cluster.DE$cluster)
 
@@ -671,12 +962,14 @@ cluster.DE.GObp_summary %>% split(cluster.DE.GObp_summary$cluster)
 
 
 
-## Export
+# Export
 ```{r}
 if(export){
 saveRDS(scRNA_regcycle, file = paste0(source.output.dir, "/Bakhoum_scRNA_cellreg.rds"))
   
 cellreg.cluster.DE %>% write.csv2(file = paste0(source.output.dir, "/Bakhoum_scRNA_cellreg_cluster_markers.csv"), row.names = FALSE)
+
+cellreg.cluster.DE2  %>% write.csv2(file = paste0(source.output.dir, "/Bakhoum_scRNA_cellreg_cluster_markers2.csv"), row.names = FALSE)
 
 cellreg.CIN.DE %>% write.csv2(file = paste0(source.output.dir, "/Bakhoum_scRNA_cellreg_CIN_cluster_markers.csv"), row.names = FALSE)
 
@@ -692,11 +985,21 @@ cellreg.CIN.DE %>% select(gene, avg_log2FC) %>% rename("NAME" = gene) %>% write.
 
 }
 
+source.output.dir <- file.path("output_cellreg")
+
 scRNA_regcycle <- readRDS(file = paste0(source.output.dir, "/Bakhoum_scRNA_cellreg.rds"))
 
 cellreg.cluster.DE <- read.csv2(file = paste0(source.output.dir, "/Bakhoum_scRNA_cellreg_cluster_markers.csv"))
+
 cellreg.CIN.DE <- read.csv2(file = paste0(source.output.dir, "/Bakhoum_scRNA_cellreg_CIN_cluster_markers.csv"))
 
+cellreg.cluster.DE2 <- read.csv2(file = paste0(source.output.dir, "/Bakhoum_scRNA_cellreg_cluster_markers2.csv"))
+
+
+```
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
 ```
 
 

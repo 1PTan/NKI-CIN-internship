@@ -1,0 +1,280 @@
+---
+title: "Bakhoum et al 2018 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+#BiocManager::install("org.Hs.eg.db", "infercnv", "AneuFinder")
+
+# install.packages("Seurat", "patchwork", "ggrepel", "sparseMatrixStats", "tidyverse", "proxy", "plotly", "pheatmap", "gplots")
+
+library(Seurat)
+library(patchwork)
+library(ggrepel)
+library(sparseMatrixStats)
+library(tidyverse)
+library(proxy)
+library(fgsea)
+library(plotly)
+library(pheatmap)
+library(gplots)
+library(plotly)
+library(infercnv)
+library(AneuFinder)
+
+select = dplyr::select
+rename = dplyr::rename
+
+set.seed(42)
+```
+
+# Loading data
+```{r}
+# generate output dir path named data
+source.output.dir <- file.path("output_cnv0.01")
+
+scSun_n <- readRDS(file = "output_sc/scSun_n.rds")
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+  dir.create(source.output.dir)
+} else{
+    print("Output folder already exists")
+  }
+
+```
+
+
+# Get gene features
+```{r}
+genes <- rownames(scSun_n) %>% as.data.frame() %>% rename(gene = ".")
+
+# browseVignettes("biomaRt")  # biomart tutorial
+
+# Use biomart to get a mapping between ensembl and entrez ids
+mart <- biomaRt::useMart(biomart = "ENSEMBL_MART_ENSEMBL",
+                         dataset = "hsapiens_gene_ensembl")
+#  mirror = c("uswest", "useast", "asia", "www")
+
+biomaRt::listEnsembl()
+# biomaRt::listDatasets(mart)
+biomaRt::searchDatasets(mart = mart, pattern = "hsapiens")
+biomaRt::listFilters(mart)
+biomaRt::listAttributes(mart)
+
+biomaRt::listAttributes(mart) %>% filter(str_detect(name, "symbol"))
+
+gene_features <- biomaRt::getBM(filters = "hgnc_symbol",
+               attributes = c("hgnc_symbol", "chromosome_name","start_position", "end_position"),
+               values = genes$gene,
+               mart = mart)
+
+gene_features %>% nrow()
+gene_features %>% select(hgnc_symbol) %>% n_distinct()
+```
+
+# Filter duplicate symbols
+```{r}
+# Genes with duplications
+gene_features.f <- gene_features %>% select(hgnc_symbol) %>% mutate(duplicates = duplicated(hgnc_symbol)) %>% filter(duplicates) %>% unique() %>% right_join(gene_features)
+
+# Choose entries with the first start position, then first end position
+gene_features.f <- gene_features.f %>% group_by(hgnc_symbol) %>% mutate(first_start = start_position == min(start_position), first_end = end_position == min(end_position)) %>% filter(first_start) %>% filter(first_end)
+
+# Check what genes still have duplications
+gene_features.f <- gene_features.f %>% select(-duplicates) %>% left_join(
+  gene_features.f %>% select(hgnc_symbol) %>% mutate(duplicates = duplicated(hgnc_symbol)) %>% filter(duplicates) %>% unique()
+)
+
+gene_features.f %>% filter(duplicates) %>% select(hgnc_symbol) %>% n_distinct()
+
+# Choose genes without duplicates, then choose duplicated genes with chromosomes not containing CHR in the name
+gene_features.f <- gene_features.f %>% filter(is.na(duplicates) | (duplicates & !str_detect(chromosome_name, "CHR")))
+
+gene_features.f <- gene_features.f %>% column_to_rownames("hgnc_symbol") %>% select(chromosome_name, start_position, end_position)
+```
+
+# Run inferCNV
+```{r}
+# Example
+
+# data(infercnv_data_example)
+# data(infercnv_annots_example)
+# data(infercnv_genes_example)
+# 
+# infercnv_object_example <- infercnv::CreateInfercnvObject(raw_counts_matrix=infercnv_data_example,
+# gene_order_file=infercnv_genes_example, annotations_file=infercnv_annots_example,
+# ref_group_names=c("normal"))
+
+# infercnv_object_example <- infercnv::run(infercnv_object_example,
+# cutoff=1,
+# out_dir=source.output.dir,
+# cluster_by_groups=TRUE,
+# denoise=TRUE,
+# HMM=FALSE,
+# num_threads=2,
+# no_plot=TRUE)
+```
+
+```{r}
+count_matrix <- GetAssayData(scSun_n, slot = "counts")
+
+# Check distribution of counts for genes with at least one count
+count_matrix[which(rowSums2(count_matrix) > 0),] %>% rowMeans() %>% summary()
+
+scSun_metadata <- scSun_n@meta.data
+
+colnames(scSun_metadata)
+
+table(scSun_metadata$cell_type)
+
+annot_scRNA <- scSun_metadata %>% select(cell_type, orig.ident) %>% mutate(
+  cell_class = ifelse(str_detect(cell_type, "Tumor"), "tumor", "non_tumor"),
+  annotation = ifelse(cell_class == "tumor", paste0(cell_class, "_", orig.ident), cell_class))
+
+annot_scRNA %>% mutate_if(is.character, as.factor) %>% summary()
+table(annot_scRNA$annotation)
+
+# annot_scRNA %>% write.csv2(file = paste(source.output.dir, "annot_scRNA.csv"))
+# gene_features.f %>% write.csv2(file = paste(source.output.dir, "gene_features.f.csv"))
+
+annot_scRNA <- read.csv2(file = paste(source.output.dir, "annot_scRNA.csv"))
+gene_features.f <- read.csv2(file = paste(source.output.dir, "gene_features.f.csv"))
+
+gene_features.f <- gene_features.f %>% column_to_rownames("X")
+annot_scRNA <- annot_scRNA %>% column_to_rownames("X")
+
+```
+
+```{r}
+infercnv_scRNA <- infercnv::CreateInfercnvObject(raw_counts_matrix = count_matrix, gene_order_file = gene_features.f, annotations_file = annot_scRNA %>% select(annotation),
+ref_group_names=c("non_tumor"))
+
+infercnv_scRNA <- infercnv::run(infercnv_scRNA,
+cutoff=0.01,   ## 0.01, 0.025, 0.1  
+out_dir=source.output.dir,
+cluster_by_groups=TRUE,
+denoise=TRUE,
+HMM=TRUE,
+num_threads=4,
+no_plot=TRUE)
+
+saveRDS(infercnv_scRNA, file = paste(source.output.dir, "infercnv_scRNA.rds"))
+
+plot_cnv(infercnv_scRNA, output_filename = "infer_cnv", out_dir = source.output.dir)
+
+```
+```{r}
+knitr::include_graphics(paste(source.output.dir, "infer_cnv.png", sep="/"))
+```
+
+# Metadata
+```{r}
+scRNA_regcycle <- add_to_seurat(
+seurat_obj = scRNA_regcycle,
+infercnv_output_path = source.output.dir,
+top_n = 10,
+bp_tolerance = 2e+06
+)
+
+CNV_data <- scRNA_regcycle@meta.data
+
+CNV_data <- CNV_data[, -c(1:11)]
+
+# CNV_data %>% rownames_to_column("cell_id") %>% write.csv2(file = paste0(source.output.dir, "/scRNA_CNV_metadata.csv"), row.names = FALSE)
+```
+
+```{r}
+cnv_object <- readRDS(file = paste0(source.output.dir, "/run.final.infercnv_obj"))
+CNV_data <- read.csv2(file = paste0(source.output.dir, "/scRNA_CNV_metadata.csv"))
+
+```
+
+```{r}
+CNVexp <- as.data.frame(cnv_object@expr.data)
+
+CNVexp %>% write.csv2(file = paste0(source.output.dir, "/inferCNV0.01_expression.csv")
+, row.names = TRUE)
+
+CNVexp_l <- CNVexp %>% rownames_to_column("gene") %>% pivot_longer(cols = -c(gene), values_to = "value", names_to = "id")
+
+summary(CNVexp_l)
+
+CNVexp_l[1:] %>% mutate(CIN_status = ifelse(str_detect(id, "dnMCAK"), "CIN-high", "CIN-low"))
+
+1+1
+
+```
+
+```{r}
+CNVexp_l %>% ggplot(aes(x = value)) + geom_histogram()
+```
+
+```{r}
+?karyotypeMeasures
+?add_to_seurat
+?plot_cnv
+?CreateInfercnvObject
+
+karyotypeMeasures
+```
+
+```{r}
+CNV_data <- as.matrix(CNV_data)
+dim(CNV_data)
+
+results <- system.file("extdata", "primary-lung", "hmms", package="AneuFinderData")
+files.lung <- list.files(results, full.names=TRUE)
+
+debug(karyotypeMeasures)
+k.lung <- karyotypeMeasures(files.lung)
+
+lung.folder <- system.file("extdata", "primary-lung", "hmms", package="AneuFinderData")
+lung.files <- list.files(lung.folder, full.names=TRUE)
+
+```
+
+```{r}
+```
+
+# Anot dbi
+```{r}
+# columns(org.Hs.eg.db) # returns list of available keytypes
+# 
+# ensembl_entrez_dbi_map <- unique_ensembl_gene_ids
+# 
+# ensembl_entrez_dbi_map$entrezid <- mapIds(org.Hs.eg.db,
+#                     keys=unique_ensembl_gene_ids$gene_id, #Column with Ensembl gene ids
+#                     column="ENTREZID",
+#                     keytype="ENSEMBL",
+#                     multiVals="first")
+# ?mapIds
+# ensembl_entrez_dbi_map$gene_symbol <- mapIds(org.Hs.eg.db,
+#                     keys=unique_ensembl_gene_ids$gene_id, #Column with Ensembl gene ids
+#                     column="SYMBOL",
+#                     keytype="ENSEMBL",
+#                     multiVals="first")
+# 
+# ensembl_entrez_dbi_map %>% filter(is.na(entrezid)) %>% n_distinct()
+# ensembl_entrez_dbi_map %>% filter(!is.na(entrezid)) %>% n_distinct()
+# 
+# # No duplicates using AnnotationDbi mapIDs
+# ensembl_entrez_dbi_map %>% select(gene_id) %>% mutate(duplicates = duplicated(gene_id)) %>% filter(duplicates) %>% right_join(ensembl_entrez_dbi_map) 
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+```
+

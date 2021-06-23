@@ -1,0 +1,708 @@
+---
+title: "Bakhoum et al 2018 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+#BiocManager::install("fgsea", "GO.db", "GOstats", "org.Hs.eg.db")
+
+# install.packages("Seurat", "patchwork", "ggrepel", "sparseMatrixStats", "msigdbr", "tidyverse", "proxy", "plotly", "pheatmap", "gplots", "Rmagic")
+
+library(Seurat)
+library(patchwork)
+library(ggrepel)
+library(sparseMatrixStats)
+library(msigdbr)
+library(GO.db)
+library(GOstats)
+library(org.Hs.eg.db)
+library(tidyverse)
+library(proxy)
+library(fgsea)
+library(plotly)
+library(pheatmap)
+library(gplots)
+library(Rmagic)
+
+set.seed(42)
+select = dplyr::select
+rename = dplyr::rename
+```
+
+```{r}
+# data(magic_testdata)
+# MAGIC_data <- magic(magic_testdata, genes=c("VIM", "CDH1", "ZEB1"))
+```
+# Helper functions
+```{r}
+GeomSplitViolin <- ggproto("GeomSplitViolin", GeomViolin, 
+                           draw_group = function(self, data, ..., draw_quantiles = NULL) {
+  data <- transform(data, xminv = x - violinwidth * (x - xmin), xmaxv = x + violinwidth * (xmax - x))
+  grp <- data[1, "group"]
+  newdata <- plyr::arrange(transform(data, x = if (grp %% 2 == 1) xminv else xmaxv), if (grp %% 2 == 1) y else -y)
+  newdata <- rbind(newdata[1, ], newdata, newdata[nrow(newdata), ], newdata[1, ])
+  newdata[c(1, nrow(newdata) - 1, nrow(newdata)), "x"] <- round(newdata[1, "x"])
+
+  if (length(draw_quantiles) > 0 & !scales::zero_range(range(data$y))) {
+    stopifnot(all(draw_quantiles >= 0), all(draw_quantiles <=
+      1))
+    quantiles <- ggplot2:::create_quantile_segment_frame(data, draw_quantiles)
+    aesthetics <- data[rep(1, nrow(quantiles)), setdiff(names(data), c("x", "y")), drop = FALSE]
+    aesthetics$alpha <- rep(1, nrow(quantiles))
+    both <- cbind(quantiles, aesthetics)
+    quantile_grob <- GeomPath$draw_panel(both, ...)
+    ggplot2:::ggname("geom_split_violin", grid::grobTree(GeomPolygon$draw_panel(newdata, ...), quantile_grob))
+  }
+  else {
+    ggplot2:::ggname("geom_split_violin", GeomPolygon$draw_panel(newdata, ...))
+  }
+})
+
+geom_split_violin <- function(mapping = NULL, data = NULL, stat = "ydensity", position = "identity", ..., 
+                              draw_quantiles = NULL, trim = TRUE, scale = "area", na.rm = FALSE, 
+                              show.legend = NA, inherit.aes = TRUE) {
+  layer(data = data, mapping = mapping, stat = stat, geom = GeomSplitViolin, 
+        position = position, show.legend = show.legend, inherit.aes = inherit.aes, 
+        params = list(trim = trim, scale = scale, draw_quantiles = draw_quantiles, na.rm = na.rm, ...))
+}
+
+# Plot gene expression of CIN high x low cells
+plot_cluster_split_violin <- function(object, id1, id2, gene_list){
+
+  # Subset data
+  id_1 <- subset(object, idents = id1)
+  id_2 <- subset(object, idents = id2)
+
+  # Get expression data of relevant genes as a data frame
+  mat <- Seurat::GetAssayData(id_1, assay = "RNA")
+  mat <- mat[rownames(mat) %in% gene_list, ]
+  df1 <- mat %>% t() %>% as.data.frame() %>% mutate(cluster = id1)
+
+  mat <- Seurat::GetAssayData(id_2, assay = "RNA")
+  mat <- mat[rownames(mat) %in% gene_list, ]
+  df2 <- mat %>% t() %>% as.data.frame() %>% mutate(cluster = id2)
+
+  # Combine data from both IDs
+  df_c <- df1 %>% rbind(df2)
+  df_c <- df_c %>% pivot_longer(cols = gene_list, names_to = "gene", values_to = "value")
+    
+  # Plot
+  plot <- df_c %>% mutate(dummy = "dummy") %>% ggplot(aes(x = dummy, y = value, fill = as.factor(cluster))) + geom_split_violin() + facet_wrap(~gene, scales = "free_x") + coord_flip() + labs(x = "", y = "Expression", title = deparse(substitute(gene_list))) +  theme(plot.title = element_text(hjust = 0.5))
+  print(plot)
+  
+#   # Z score and plot
+#   df_z <- df_c %>% group_by(gene) %>% mutate(Z_scored_value = (value-mean(value))/sd(value), dummy = "dummy")
+# # group_by(cluster, gene)
+#   zplot <- df_z %>% ggplot(aes(x = dummy, y = Z_scored_value, fill = as.factor(cluster))) + geom_split_violin() + facet_wrap(~gene, scales = "free_x") + coord_flip() + labs(x = "", y = "Z-scored expression", title = deparse(substitute(gene_list))) +  theme(plot.title = element_text(hjust = 0.5))
+#   print(zplot)
+}
+
+save_pheatmap_png <- function(x, filename, width=3500, height=7000, res = 300) {
+  png(filename, width = width, height = height, res = res)
+  grid::grid.newpage()
+  grid::grid.draw(x$gtable)
+  dev.off()
+}
+
+```
+
+
+# Loading data
+```{r}
+# Load filtered and combined data
+# scRNA_c <- readRDS(file = "data/scRNA_c.rds")
+export = FALSE
+
+# generate output dir path named data
+source.output.dir <- file.path("output_MAGIC")
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+} else{
+  print("Output folder already exists")
+}
+```
+
+```{r}
+# Load objects instead of handling computations in this script
+scRNAmagic <- readRDS(file = paste0(source.output.dir, "/Bakhoum_scRNAmagic.rds"))
+
+cluster.DE.magic <- read.csv2(paste0(source.output.dir, "/Bakhoum_scRNAmagic_cluster_markers.csv"))
+
+```
+
+```{r}
+# mat <- GetAssayData(scRNA_c, slot = "counts")
+# mat <- mat[rowMeans(mat) > 0,]
+# 
+# scRNAf = CreateSeuratObject(counts = mat, project = "CIN")
+# 
+# scRNAmagic <- magic(scRNAf, t = 3, knn = 21)
+# scRNAmagic@active.assay <- 'MAGIC_RNA'
+# 
+# rm(mat, scRNAf)
+```
+
+# Normalize and scale
+```{r}
+# median_library_size <- scRNAmagic@assays$MAGIC_RNA %>% colSums() %>% median()
+
+# Normalize dataset
+# scRNAmagic <- NormalizeData(scRNAmagic, normalization.method = "LogNormalize", scale.factor = median_library_size)
+
+# find highly variable features with a variance stabilizing transform
+# scRNAmagic <- FindVariableFeatures(scRNAmagic, selection.method = "vst", nfeatures = 2000)
+
+# VariableFeaturePlot(scRNAmagic) %>% LabelPoints(points = head(VariableFeatures(scRNAmagic), 30), repel = TRUE)
+
+# Scale dataset
+# scRNAmagic <- ScaleData(scRNAmagic, features = rownames(scRNAmagic))
+
+# Add CIN status meta data
+# scRNAmagic@meta.data <- scRNAmagic@meta.data %>% mutate(CIN_status = ifelse(orig.ident %in% c("dnMCAK"),"CIN-high","CIN-low"))
+
+# rm(scRNA_c)
+```
+
+# Normalize and scale
+```{r}
+scRNAmagic@active.assay <- 'RNA'
+median_library_size <- scRNAmagic@assays$RNA %>% colSums() %>% median()
+
+# Normalize dataset
+scRNAmagic <- NormalizeData(scRNAmagic, normalization.method = "LogNormalize", scale.factor = median_library_size)
+
+# find highly variable features with a variance stabilizing transform
+scRNAmagic <- FindVariableFeatures(scRNAmagic, selection.method = "vst", nfeatures = 2000)
+
+# VariableFeaturePlot(scRNAmagic) %>% LabelPoints(points = head(VariableFeatures(scRNAmagic), 30), repel = TRUE)
+
+# Scale dataset
+scRNAmagic <- ScaleData(scRNAmagic, features = rownames(scRNAmagic))
+
+# Add CIN status meta data
+scRNAmagic@meta.data <- scRNAmagic@meta.data %>% mutate(CIN_status = ifelse(orig.ident %in% c("dnMCAK"),"CIN-high","CIN-low"))
+
+rm(scRNA_c)
+```
+
+# Perform PCA
+```{r}
+
+scRNAmagic@active.assay <- 'MAGIC_RNA'
+# Perform PCA
+# scRNAmagic <- RunPCA(scRNAmagic, features = VariableFeatures(object = scRNAmagic), npcs = 200)
+
+# Plot PCA results
+Idents(scRNAmagic) <- "orig.ident"
+VizDimLoadings(scRNAmagic, dims = 1:2, reduction = "pca")
+DimPlot(scRNAmagic, reduction = "pca")
+ElbowPlot(scRNAmagic, ndims = 200)
+
+DimHeatmap(scRNAmagic, dims = 1:10, cells = 500, balanced = TRUE)
+
+# Check the total variance explained
+# On Seurat 3:
+pca <- scRNAmagic[["pca"]]
+# Get the total variance of the scaled counts matrix:
+mat <- Seurat::GetAssayData(scRNAmagic, assay = "MAGIC_RNA", slot = "scale.data")
+mat <- mat[rownames(mat) %in% VariableFeatures(scRNAmagic), ]
+
+total_variance <- sum(matrixStats::rowVars(mat))
+
+eigValues = (pca@stdev)^2  ## EigenValues
+varExplained = eigValues / total_variance
+
+varExplained
+
+cumsum(varExplained) %>% as.data.frame() %>% rename("cumvar" = ".") %>% ggplot(aes(x = c(1:200), y = cumvar)) + geom_point() + labs(x = "PC #", y = "Cumulative Variance")
+
+rm(mat)
+rm(pca)
+
+#Perform PCA "manually" on the matrix to check Seurat % variance explained
+
+# USV <- svd(mat)	
+# ssqtotal <- sum(mat*mat)
+# 
+# T <- USV$u %*% diag(USV$d)
+# head(T)
+# P <- USV$v
+# npc <- 200
+# ssqtot <- 0 * (1:npc)
+# for (i in 1:npc){
+#   print(i)
+#   Xest  <- T[,1:i] %*% t(P[,1:i])
+#   ssqtot[i] <- 100 * (1-sum((mat-Xest)*(mat-Xest))/ssqtotal)
+# }
+# 
+# ssq=c(ssqtot[1],ssqtot[2:10]-ssqtot[1:9])
+# rawPCA <- data.frame(ssq=ssq,ssqtot=ssqtot)
+# 
+# rm(T)
+# rm(P)
+# rm(rawPCA)
+# rm(Xest)
+# rm(USV)
+
+```
+
+```{r}
+# Compute a null distribution for feature scores by permuting 1% of the data multiple times and compare this with information within each PC to obtain a significance estimate
+# scRNAmagic <- JackStraw(scRNAmagic, num.replicate = 100, dims = 50)
+# scRNAmagic <- ScoreJackStraw(scRNAmagic, dims = 1:50)
+
+JackStrawPlot(scRNAmagic, dims = 1:50)
+# 1:50
+```
+# Cell cycle assignment
+```{r}
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can
+# segregate this list into markers of G2/M phase and markers of S phase
+# s.genes <- cc.genes$s.genes
+# g2m.genes <- cc.genes$g2m.genes
+
+# scRNAmagic@active.assay <- 'RNA'
+
+# Assign and inspect cell cycle scores
+# scRNAmagic <- CellCycleScoring(scRNAmagic, s.features = s.genes, g2m.features = g2m.genes)
+
+
+scRNAmagic[[]] %>% select(S.Score, G2M.Score, Phase) %>% mutate_if(is.character, as.factor) %>% summary()
+
+Idents(scRNAmagic) <- "Phase"
+RidgePlot(scRNAmagic, features = c("PCNA", "TOP2A", "MCM6", "MKI67"), ncol = 2)
+Idents(scRNAmagic) <- "orig.ident"
+RidgePlot(scRNAmagic, features = c("PCNA", "TOP2A", "MCM6", "MKI67"), ncol = 2)
+
+```
+# Run UMAP and TSNE
+```{r}
+scRNAmagic@active.assay <- 'MAGIC_RNA'
+
+# Dimensionality reduction with UMAP on variable features instead of PCs
+# scRNAmagic <- RunUMAP(scRNAmagic, reduction.use = NULL, features = VariableFeatures(scRNAmagic))
+
+# Store this UMAP as a custom reduction
+# scRNAmagic[["UMAP_features"]] <- CreateDimReducObject(embeddings = scRNAmagic@reductions$umap@cell.embeddings, key = "UMAP_features", assay = DefaultAssay(scRNAmagic))
+
+# Run UMAP and project in 3D dimensions
+# scRNAmagic <- RunUMAP(scRNAmagic, dims = 1:40, n.components = 3L)
+
+# Store this UMAP as a custom reduction
+# scRNAmagic[["umap3d"]] <- CreateDimReducObject(embeddings = scRNAmagic@reductions$umap@cell.embeddings, key = "umap3d", assay = DefaultAssay(scRNAmagic))
+
+# Dimensionality reduction with UMAP and tSNE on PCs
+# scRNAmagic <- RunUMAP(scRNAmagic, dims = 1:40)
+
+# scRNAmagic <- RunTSNE(scRNAmagic, dims.use = 1:40, reduction.use = "pca", perplexity = 30)
+
+```
+# Clustering cells
+```{r}
+# scRNAmagic <- FindNeighbors(scRNAmagic, features = VariableFeatures(object = scRNAmagic))
+# scRNAmagic <- FindClusters(scRNAmagic, resolution = 0.15)
+
+# scRNAmagic <- StashIdent(scRNAmagic, save.name = "clusterID")
+
+# Inspect cluster information
+#head(Idents(scRNA_cn), 5)
+Idents(scRNAmagic) <- "clusterID"
+
+table(scRNAmagic$orig.ident)
+table(scRNAmagic$clusterID)
+prop.table(table(scRNAmagic$clusterID))
+prop.table(table(scRNAmagic$clusterID, scRNAmagic$orig.ident), margin = 2)
+prop.table(table(scRNAmagic$orig.ident, scRNAmagic$clusterID), margin = 2)
+
+prop.table(table(scRNAmagic$CIN_status))
+prop.table(table(scRNAmagic$clusterID, scRNAmagic$CIN_status), margin = 2)
+prop.table(table(scRNAmagic$CIN_status, scRNAmagic$clusterID), margin = 2)
+prop.table(table(scRNAmagic$Phase, scRNAmagic$CIN_status), margin = 2)
+
+table(scRNAmagic$clusterID, scRNAmagic$CIN_status) %>% as.data.frame() %>% rename("clusterID" = Var1, "group" = Var2) %>% ggplot(aes(x = clusterID, y = group, fill = Freq)) + geom_tile() + scale_fill_distiller(palette = "PuBu") + geom_text(aes(label=Freq)) + labs(y = "", fill = "Number of cells")
+
+```
+
+# Visualization
+```{r}
+DimPlot(scRNAmagic, reduction = "UMAP_features", group.by = "CIN_status")
+DimPlot(scRNAmagic, reduction = "UMAP_features", group.by = "orig.ident")
+DimPlot(scRNAmagic, reduction = "UMAP_features", group.by = "Phase")
+DimPlot(scRNAmagic, reduction = "UMAP_features", group.by = "clusterID")
+
+DimPlot(scRNAmagic, reduction = "umap", group.by = "CIN_status")
+DimPlot(scRNAmagic, reduction = "umap", group.by = "orig.ident")
+DimPlot(scRNAmagic, reduction = "umap", group.by = "Phase")
+DimPlot(scRNAmagic, reduction = "umap", group.by = "clusterID")
+
+DimPlot(scRNAmagic, reduction = "tsne", group.by = "CIN_status")
+DimPlot(scRNAmagic, reduction = "tsne", group.by = "orig.ident")
+DimPlot(scRNAmagic, reduction = "tsne", group.by = "Phase")
+DimPlot(scRNAmagic, reduction = "tsne", group.by = "clusterID")
+```
+
+# 3D UMAP
+```{r}
+# Extract cell embedding information from Seurat Object
+# umap_1 <- scRNA_cn[["umap3d"]]@cell.embeddings[,1]
+# umap_2 <- scRNA_cn[["umap3d"]]@cell.embeddings[,2]
+# umap_3 <- scRNA_cn[["umap3d"]]@cell.embeddings[,3]
+
+# Visualize what headings are called so that you can extract them to form a dataframe
+# Embeddings(object = scRNAmagic, reduction = "umap") %>% head()
+# Embeddings(object = scRNAmagic, reduction = "umap3d") %>% head()
+
+# Prepare a dataframe for cell plotting
+plot.data <- FetchData(object = scRNAmagic, vars = c("umap3d_1", "umap3d_2", "umap3d_3", "seurat_clusters", "Phase", "orig.ident"))
+
+# Make a column of row name identities (these will be your cell/barcode names)
+plot.data$label <- paste(rownames(plot.data))
+
+# Plot your data
+#When you visualize your plotly object, hovering your mouse pointer over a point shows cell names
+
+fig <- plot_ly(data = plot.data, 
+        x = ~umap3d_1, y = ~umap3d_2, z = ~umap3d_3, 
+        color = ~seurat_clusters, 
+        colors = c("lightseagreen", "gray50", "darkgreen", "red4", "red", "turquoise4",
+                   "black", "yellow4", "royalblue1", "lightcyan3", "peachpuff3",
+                   "khaki3", "gray20", "orange2", "royalblue4", "yellow3", "gray80",
+                   "darkorchid1", "lawngreen", "plum2", "darkmagenta"),
+        type = "scatter3d", 
+        mode = "markers", 
+        marker = list(size = 3, width=2), # controls size of points
+        text=~orig.ident,
+        hoverinfo="text") 
+fig
+
+
+fig <- plot_ly(data = plot.data, 
+        x = ~umap3d_1, y = ~umap3d_2, z = ~umap3d_3, 
+        color = ~orig.ident, 
+        colors = c("lightseagreen", "gray50", "darkgreen", "red4", "red", "turquoise4",
+                   "black", "yellow4", "royalblue1", "lightcyan3", "peachpuff3",
+                   "khaki3", "gray20", "orange2", "royalblue4", "yellow3", "gray80",
+                   "darkorchid1", "lawngreen", "plum2", "darkmagenta"),
+        type = "scatter3d", 
+        mode = "markers", 
+        marker = list(size = 3, width=2), # controls size of points
+        text=~seurat_clusters,
+        hoverinfo="text") 
+fig
+
+
+fig <- plot_ly(data = plot.data, 
+        x = ~umap3d_1, y = ~umap3d_2, z = ~umap3d_3, 
+        color = ~Phase, 
+        colors = c("lightseagreen", "gray50", "darkgreen", "red4", "red", "turquoise4",
+                   "black", "yellow4", "royalblue1", "lightcyan3", "peachpuff3",
+                   "khaki3", "gray20", "orange2", "royalblue4", "yellow3", "gray80",
+                   "darkorchid1", "lawngreen", "plum2", "darkmagenta"),
+        type = "scatter3d", 
+        mode = "markers", 
+        marker = list(size = 3, width=2), # controls size of points
+        text=~orig.ident,
+        hoverinfo="text") 
+
+fig
+# Before you plot, set the ranges of the axis you desire. This set axis range will be 
+# present across all clusters, and plotly will not adjust for axis length anymore
+# this axis length will persist even when selecting some clusters
+
+# xaxis
+# axx <- list(nticks = 4,  range = c(-10,10))
+
+# yaxis
+# axy <- list(nticks = 4, range = c(-10,10))
+
+#zaxis
+# axz <- list(nticks = 4, range = c(-10,10))
+
+
+# fig <- fig %>% layout(scene = list(xaxis=axx,yaxis=axy,zaxis=axz))
+# fig_cube <- fig %>% layout(scene = list(xaxis=axx,yaxis=axy,zaxis=axz, aspectmode='cube')) # To maintain cubic aspect
+
+rm(plot.data)
+```
+
+# Cluster markers
+```{r} 
+# Find cluster markers 
+Idents(scRNAmagic) <- "clusterID"
+
+# cluster.DE.magic <- FindAllMarkers(scRNAmagic, min.pct = 0.05, logfc.threshold = 0, pseudocount.use = 0.001)
+
+#cluster.markers
+clustertop10 <- cluster.DE.magic %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+
+cluster.DE.magic %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+```
+
+```{r}
+DoHeatmap(scRNAmagic, features = clustertop10$gene) + NoLegend()
+```
+
+# Plotting signatures
+## EMT
+```{r}
+# Plotting EMT signature 
+EMT_signature <- c("EZH", "JUN", "VIM", "STEAP1", "SOX4", "MMP14", "SHH", "TIMP1", "ZEB1", "ZEB2", "SNAI2")
+# FeaturePlot(scRNA_regcycle, features = EMT_signature)
+
+EMT_signature <- EMT_signature[EMT_signature %in% rownames(scRNAmagic@assays$RNA)]
+
+Idents(scRNAmagic) <- "clusterID"
+for(i in 1:length(EMT_signature)){
+p <- VlnPlot(scRNAmagic, features = EMT_signature[i])
+print(p)
+}
+
+```
+## M Signature
+```{r}
+# Plotting Genes enriched in the "M" Population from Bakhoum et al Extended figure 6b 
+M_markers <- c("ITGB5", "ITGB1", "ITGA5", "ITGA10", "IGFBP4", "FN1", "DSC2", "CXCL1","CTNNB1", "BMP4", "BCL2L1", "VIM", "TIMP1", "TGFBR2", "TGFBI", "TGFB1", "PPARG", "NUPR1", "MSN", "LMCD1", "LEF1", "JAG1")
+
+M_markers <- M_markers[M_markers %in% rownames(scRNAmagic@assays$RNA)]
+
+Idents(scRNAmagic) <- "clusterID"
+for(i in 1:length(M_markers)){
+p <- VlnPlot(scRNAmagic, features = M_markers[i])
+print(p)
+}
+```
+
+## CIN signature
+```{r}
+# Plot CIN signature from Bakhoum et al 2018 (Supp. table 5), comparing CIN high and CIN low
+CIN_signature <- c('PELI2','BMP2','SHH','TNS4','RAB3B','ROBO1','ARHGAP28','CHN2','CST1','F13A1','CPVL','SEMA6D','NHSL2','GTF2IP7','DPYSL3','PCDH7','KHDRBS3','TRAC','TMEM156', 'CST4','CD24','FGF5','NTN4')
+
+CIN_signature <- CIN_signature[CIN_signature %in% rownames(scRNAmagic@assays$RNA)]
+
+
+Idents(scRNAmagic) <- "clusterID"
+for(i in 1:length(CIN_signature)){
+p <- VlnPlot(scRNAmagic, features = CIN_signature[i])
+print(p)
+}
+```
+
+```{r}
+scRNAmagic@meta.data <- scRNAmagic@meta.data %>% mutate(
+  cluster_1comp = ifelse(clusterID %in% c(1), as.character(clusterID), "Others"),
+  cluster_2comp = ifelse(clusterID %in% c(2), as.character(clusterID), "Others"),
+  cluster_1_2comp = ifelse(clusterID %in% c(1,3), as.character(clusterID), "Others*")
+)
+
+
+# Idents(scRNAmagic) <- "CIN_status"
+
+# plot_cluster_split_violin(object = scRNAmagic, id1 = "CIN-high", id2 = "CIN-low", gene_list = EMT_signature)
+
+# plot_cluster_split_violin(object = scRNAmagic, id1 = "CIN-high", id2 = "CIN-low", gene_list = M_markers)
+
+# plot_cluster_split_violin(object = scRNAmagic, id1 = "CIN-high", id2 = "CIN-low",  gene_list = CIN_signature)
+
+Idents(scRNAmagic) <- "cluster_1comp"
+
+plot_cluster_split_violin(object = scRNAmagic, id1 = 1, id2 = "Others", gene_list = EMT_signature)
+
+plot_cluster_split_violin(object = scRNAmagic, id1 = 1, id2 = "Others", gene_list = M_markers)
+
+plot_cluster_split_violin(object = scRNAmagic, id1 = 1, id2 = "Others", gene_list = CIN_signature)
+
+Idents(scRNAmagic) <- "cluster_2comp"
+
+plot_cluster_split_violin(object = scRNAmagic, id1 = 2, id2 = "Others", gene_list = EMT_signature)
+
+plot_cluster_split_violin(object = scRNAmagic, id1 = 2, id2 = "Others", gene_list = M_markers)
+
+plot_cluster_split_violin(object = scRNAmagic, id1 = 2, id2 = "Others", gene_list = CIN_signature)
+
+```
+
+# Export
+```{r}
+if(export){
+  
+saveRDS(scRNAmagic, file = paste0(source.output.dir, "/Bakhoum_scRNAmagic.rds"))
+  
+cluster.DE.magic %>% write.csv2(file = paste0(source.output.dir, "/Bakhoum_scRNAmagic_cluster_markers.csv"), row.names = FALSE)
+}
+
+# scRNAmagic <- readRDS(file = paste0(source.output.dir, "/Bakhoum_scRNAmagic.rds"))
+
+# cluster.DE.magic <- read.csv2(paste0(source.output.dir, "/Bakhoum_scRNAmagic_cluster_markers.csv"))
+```
+
+
+```{r}
+rm(scRNAmagic)
+rm(cluster.DE.magic)
+```
+
+# Load msigdb hallmarks gene set
+```{r}
+# all_gene_sets <- msigdbr("Homo sapiens")
+
+# msigdb_hallmarks_set <- filter(all_gene_sets, gs_cat == "H") %>% select(gs_name, gene_symbol)
+
+# msigdb_hallmarks_set <- split(msigdb_hallmarks_set$gene_symbol, msigdb_hallmarks_set$gs_name)
+
+msigdb_hallmarks_names <- read.csv2("data/names_hallmarks.csv")
+
+# packageVersion("msigdbr")
+
+# rm(all_gene_sets)
+# Another option is loading files with gene sets
+# msigdb_hallmarks <- gmtPathways("data/h.all.v7.4.symbols.gmt")
+# msigdb_hallmarks %>% head() %>% lapply(head)
+
+```
+
+# Clustering cells on EMT genes
+```{r}
+# colfunc <- colorRampPalette(c("darkblue", "blue", "white", "red", "darkred"))
+
+# Get the total variance of the scaled counts matrix:
+# mat <- Seurat::GetAssayData(scRNAmagic, assay = "MAGIC_RNA", slot = "scale.data")
+# mat <- mat[rownames(mat) %in% msigdb_hallmarks_set$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION, ]
+
+# EMT_signature %in% msigdb_hallmarks_set$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION
+
+# Z-score matrix counts
+# gene_means = rowMeans(mat)
+# gene_SDs = rowSds(mat)
+
+# If the SD is zero, use 1 instead, it won't affect the mean number
+# another option is to filter these genes out
+# gene_SDs[gene_SDs == 0] <- 1
+
+# Z_score_mat = (mat - gene_means)/gene_SDs
+
+# mat_annotation <- scRNAmagic@meta.data %>% select(orig.ident)
+
+# color_annotation <- list(orig.ident =  c("darkslategray3", "blue4", "red"))
+# names(color_annotation$orig.ident) <- unique(mat_annotation$orig.ident)
+
+# heatmap <- pheatmap(Z_score_mat, color = colfunc(100), show_colnames = FALSE, annotation_col = mat_annotation, annotation_colors = color_annotation, main = "pheatmap column scaling")
+# 
+# my.breaks = c(-2.5, 2.5)
+# my.colors <- c(colorRampPalette(colors = c("blue", "white"))(length(my.breaks)/2), colorRampPalette(colors = c("white", "red"))(length(my.breaks)/2))
+
+# heatmap_trim <- pheatmap(Z_score_mat, my.colors, show_colnames = FALSE, annotation_col = mat_annotation, annotation_colors = color_annotation, main = "pheatmap column scaling", breaks = my.breaks)
+
+# Using threshold breaks at Z scores of 2.5
+# Z_score_mat_t <- Z_score_mat
+# Z_score_mat_t[Z_score_mat_t > 5] <- 5
+# Z_score_mat_t[Z_score_mat_t < -5] <- -5
+
+# heatmap_trim <- pheatmap(Z_score_mat_t, color = colfunc(100), show_colnames = FALSE, annotation_col = mat_annotation, annotation_colors = color_annotation, main = "pheatmap column scaling")
+
+save_pheatmap_png <- function(x, filename, width=3500, height=7000, res = 300) {
+  png(filename, width = width, height = height, res = res)
+  grid::grid.newpage()
+  grid::grid.draw(x$gtable)
+  dev.off()
+}
+
+if(export){
+save_pheatmap_png(heatmap, filename = paste0(source.output.dir, "/EMT_heatmap.png"))
+
+save_pheatmap_png(heatmap_trim, filename = paste0(source.output.dir, "/EMT_heatmap_trim.png"))
+}
+
+knitr::include_graphics(paste(source.output.dir, "EMT_heatmap.png", sep="/"))
+knitr::include_graphics(paste(source.output.dir, "EMT_heatmap_trim.png", sep="/"))
+
+
+rm(color_annotation)
+rm(Z_score_mat_t)
+rm(Z_score_mat)
+rm(mat)
+rm(gene_means)
+rm(gene_SDs)
+```
+
+# FGSEA DE between clusters
+```{r}
+cluster.DE.fgsea_summary <- read.csv2(file = paste0(source.output.dir, "/scRNAmagic_cluster_fgsea.csv"))
+cluster.DE.fgsea <- cluster.DE.fgsea_summary %>% split(f = cluster.DE.fgsea_summary$cluster)
+
+# cluster.DE.l <- cluster.DE.magic %>% select(gene, cluster, avg_log2FC) %>% split(f = cluster.DE.magic$cluster)
+
+# cluster.DE.fgsea <- cluster.DE.l %>% lapply(FUN = function(x){
+#   x <- x %>% select(-cluster) %>% deframe()
+#   x <- fgsea(pathways = msigdb_hallmarks_set, 
+#                   stats = x,
+#                   minSize = 15,
+#                   maxSize = 500)
+# })
+
+# Plot results for the GSEA on each cluster 
+lapply(seq_along(cluster.DE.fgsea), FUN = function(i){
+  cluster.DE.fgsea[[i]] <- cluster.DE.fgsea[[i]] %>% mutate(
+    within_threshold = padj < 0.05, 
+    padj = ifelse(pval < 0.0001, 0.000101, padj)
+    ) %>% left_join(msigdb_hallmarks_names)
+
+  cluster.DE.fgsea[[i]] %>% ggplot(aes(x = log10(padj), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = as.factor(sign(NES)))) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(padj), y = NES, label = name), data = cluster.DE.fgsea[[i]] %>% filter(within_threshold | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20) +
+  labs(x = "log10(padj)", y = "Normalized Enrichment Score", col = "Enriched in Cluster", title = paste("Cluster: ", i - 1, sep = "")) + 
+  scale_y_continuous(limits = c(-3.5,3.5), breaks = seq(-3.5,3.5,0.5)) +
+  scale_x_continuous(trans = "reverse", limits = c(0, -4), breaks = c(-4, -3, -2, -1, 0) , labels = c("<0.0001", "0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+})
+
+# Combine summaries from the fGSEA
+# cluster.DE.fgsea_summary <- cluster.DE.fgsea[[1]] %>% mutate(cluster = 0) %>% filter(pval == "nothing")
+
+# for(i in 1:length(cluster.DE.fgsea)){
+#   print(i)
+#   cluster.DE.fgsea_summary <- rbind(
+#     cluster.DE.fgsea_summary, 
+#     cluster.DE.fgsea[[i]] %>% mutate(cluster = i-1)
+#     )
+# }
+
+if(export){
+cluster.DE.fgsea_summary %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNAmagic_cluster_fgsea.csv"), row.names = FALSE)
+}
+
+```
+## Heatmap Cluster NES
+```{r}
+colfunc <- colorRampPalette(c("blue", "white", "red"))
+
+cluster_NES <- cluster.DE.fgsea_summary %>% mutate(NES = ifelse(padj < 0.2, NES, 0)) %>% left_join(msigdb_hallmarks_names) %>% select(name, NES, cluster) %>% pivot_wider(values_from = NES, names_from = name) %>% column_to_rownames("cluster") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix() %>% pheatmap(color = colfunc(10))
+
+if(export){
+save_pheatmap_png(cluster_NES, filename = paste0(source.output.dir, "/magic_cluster_NES_heatmap.png"), width = 500, height = 500)
+}
+
+# cluster.DE.fgsea_summary %>% left_join(msigdb_hallmarks_names) %>% select(name, NES, cluster) %>% pivot_wider(values_from = NES, names_from = name)  %>% 
+#   column_to_rownames(var = "cluster") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix() %>%
+#   heatmap.2(col=colfunc(10), dendrogram = "both", trace = "none", srtCol = 75)
+
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+```
+

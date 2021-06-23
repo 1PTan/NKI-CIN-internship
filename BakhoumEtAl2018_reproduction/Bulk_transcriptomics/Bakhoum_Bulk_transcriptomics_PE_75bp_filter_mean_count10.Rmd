@@ -1,0 +1,1054 @@
+---
+title: "Reproduction of Bakhoum et al 2018 Bulk Transcriptomics"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output:
+  html_document:
+    toc: yes
+    number_sections: yes
+  pdf_document:
+    toc: yes
+---
+# Install/load packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6
+)
+
+# install.packages("BiocManager", "broom", "patchwork", "ggfortify", "colorspace", "GGally", "ggrepel", AnnotationDbi", "tidyverse", "gplots", "pheatmap", "RColorBrewer", "msigdbr", "readxl")
+
+# BiocManager::install("DESeq2", "apeglm", "fgsea", "recount3", "org.Hs.eg.db")
+
+library(DESeq2)
+library(broom)
+library(patchwork)
+library(ggfortify)
+library(colorspace)
+library(GGally)
+library(ggrepel)
+library(AnnotationDbi)
+library(tidyverse)
+library(gplots)
+library(pheatmap)
+library(RColorBrewer)
+library(org.Hs.eg.db)
+library(msigdbr)
+library(fgsea)
+library(readxl)
+
+select = dplyr::select
+
+set.seed(42)
+```
+
+# Load data
+```{r load_data, include=FALSE}
+# Load ensembl gene database
+ensembl_db <- read.csv("EnsDb.Hsapiens.v86.csv")
+
+# Load transcriptomics count data
+# Each row is a gene, each column a sample
+df.counts.raw <- read.csv("data/GSE98183_Counts.geneSymbols.75bpPE.csv")
+
+df.counts.FPKM <- read.csv("data/GSE98183_FPKM.geneSymbols.75bpPE.csv")
+
+# df.counts.raw2 <- read.csv("data/GSE98183_Counts.geneSymbols.csv")
+
+# df.counts.raw2[, c(13, 15, 16, 17, 18)]
+# df.counts.raw2 <- read.csv("data/GSE98183_Counts.geneSymbols.101bpSE.csv") 
+
+# load sample design
+design <- read.csv2("data/samples.csv")
+colnames(design) <- c("Sample", "Name", "Group")
+
+# Sample names
+colnames(df.counts.raw)
+colnames(df.counts.raw) <- c("gene", "MK", "MKH", "Kb", "Ka", "cont")
+
+# df.counts.raw[df.counts.raw %>% column_to_rownames("gene") %>% rowMeans() > 0,]
+
+export = FALSE
+source.output.dir <- file.path("output_PE75bp_filter_mean_10_orig")
+
+if(export){
+  # generate output dir path named data
+
+  # if source output dir does not exist, create it
+  if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+  } else{
+    print("Output folder already exists")
+  }
+}
+```
+
+```{r}
+# Summary of dataframe with columns as factors
+df.counts.raw %>% lapply(as.character) %>% lapply(as.factor) %>% as.data.frame() %>% summary()
+```
+
+```{r}
+# Compute and plot total counts per sample
+df.counts.raw %>% column_to_rownames("gene") %>% colSums() %>% data.frame() %>% rename("Value" = ".") %>% rownames_to_column("Sample") %>% 
+  ggplot(aes(x = Sample, y = Value, fill = Sample)) + geom_col() + labs(x = "Sample_ID", y = "Raw Counts", title = "Raw total counts") + theme(plot.title = element_text(hjust= 0.5), legend.position = "none") + scale_y_continuous(labels = scales::comma) + scale_fill_viridis_d()
+
+```
+
+```{r}
+# Convert dataframe to long format
+df.counts.long <- df.counts.raw %>% pivot_longer(cols = c(-gene), values_to = "Count",  names_to = "Sample")
+```
+
+```{r}
+# Some of the gene names in the count data correspond to the gene_name, some to the ENSEMBL gene_id
+
+# Create a "gene" column in the ensembl_db that corresponds to either the id or the name, depending on how it was annotated in the count data
+gene_ensembl_db <- df.counts.raw %>% select(gene) %>% inner_join(ensembl_db %>% mutate(gene = gene_name)) %>% rbind(
+  df.counts.raw %>% select(gene) %>% inner_join(ensembl_db %>% mutate("gene" = gene_id))
+  )
+```
+
+# Ribosomal RNA 
+
+Out of all the RNA present in a prokaryotic cell, roughly 85% is ribosomal (r)RNAs. Thus when sequencing RNA 85% of the reads will be on non-coding rRNA, while we are interested in mRNA. To improve sensitivity and dynamic range on the mRNA levels we remove the rRNA, called ribosomal RNA depletion. We should check if this procedure was effective.
+  
+```{r}
+# The top most expressed genes are rRNA, filter out?
+df.counts.long %>% group_by(gene) %>% summarize(mean = mean(Count)) %>% ungroup() %>% 
+  left_join(gene_ensembl_db, by = "gene") %>% arrange(-mean) %>% head(10)
+
+# Check types of genes in the ensembl db
+# gene_ensembl_db$gene_biotype %>% as.factor() %>% levels()
+
+# Plot the proportion of rRNA in each sample
+df.counts.long %>% group_by(Sample) %>% 
+  left_join(gene_ensembl_db, by = "gene") %>%
+  mutate(raw_total = sum(Count)) %>%
+  filter(gene_biotype %in% c("rRNA", "Mt_rRNA")) %>% 
+  group_by(Sample, raw_total) %>% 
+  summarize(rRNA_sum = sum(Count)) %>%
+  mutate(fraction_rRNA = rRNA_sum/raw_total) %>%
+  ggplot(aes(x = Sample, y = fraction_rRNA, fill = Sample)) + geom_col() + labs(x = "Sequence ID", y = "Percentage of rRNA", title = "percentage of rRNA and Mt_rRNA") + theme(plot.title = element_text(hjust= 0.5), legend.position = "none") + scale_y_continuous(labels = scales::percent) + scale_fill_viridis_d()
+```
+
+# Filtering out low-count genes
+```{r}
+# Check how many genes have a sample with at least X counts
+df.counts.long %>%
+  group_by(gene) %>% filter(any(Count > 0)) %>% ungroup() %>% select(gene) %>% n_distinct()
+
+# df.counts.long %>%
+#   group_by(gene) %>% summarize(mean = mean(Count)) %>% ungroup() %>% filter(mean >= 10)
+
+df.counts.long <- df.counts.long %>% left_join(df.counts.long %>%
+  group_by(gene) %>% summarize(mean = mean(Count)))
+
+# filter out genes which have mean counts below 10.
+# Also create a column for log2 of pseudocounts
+df.counts.f <- df.counts.long %>% filter(mean >= 10) %>% 
+  mutate(counts_log2 = log2(Count+1))
+
+# Compare the number of genes
+df.counts.raw$gene %>% n_distinct()
+df.counts.f$gene %>% n_distinct()
+
+```
+
+# Visualizing count distribution
+
+Visualize the distribution of the counts in log space.
+
+Are the samples similar or different? Do you see outliers? Can you conclude that the values are consistent, or is a normalization step required?
+```{r}
+# make a boxplot using the counts_log2 column
+df.counts.f %>% ggplot(aes(x = Sample, y = counts_log2, col = Sample)) + geom_boxplot() + labs(x = "Sample", y = "log2 Counts", title = "Distribution of Log2 Counts") + theme(legend.position = "none", plot.title = element_text(hjust= 0.5)) + scale_fill_brewer(palette = "Dark2")
+
+# make a density using the counts_log2 column
+df.counts.f %>% ggplot(aes(counts_log2, col = Sample)) + geom_density()
+```
+
+# Sample comparison 
+```{r}
+# use pivot_wider to change from long format. Take the values from the `counts_log2` column
+
+# Compare the expression of genes between all pairs of samples
+df.counts.f %>% select(-c(Count)) %>% pivot_wider(names_from = Sample, values_from = counts_log2)  %>% select(-c(gene)) %>% ggpairs(
+  lower = list(continuous = wrap("points", alpha = 0.3, size = 0.5))
+)
+```
+# Differential Expression
+
+## Preparing the data for DESeq2
+DESeq2 needs as inputs, at least, 3 objects:
+
+- countData: a matrix containing genes in rows and samples in columns. Gene names should be set as the row names of the matrix.
+- colData: a data.frame with two columns, one containing the sample names and the other one containing the experimental conditions (in our case, control and treatment).
+- design: a formula indicating the name of the column in the colData object that contains the experimental conditions.
+
+```{r}
+# join design data
+# Convert CIN-medium label to CIN-High, as done in the paper
+design_c <- design %>% mutate(Group = ifelse(Group == "CIN-medium", "CIN-high", Group))
+
+df.counts.f <- df.counts.f %>% left_join(design_c,  by = "Sample")
+```
+
+Create the object for countData. Transform the df.diff to wide format, set the genes as row names and convert to matrix.
+
+```{r}
+# select only the necessary columns
+# tranform to wide format
+# set the row names
+# transform to to matrix.
+df.diff.wide <- df.counts.f %>% 
+  arrange(Group) %>% 
+  select(gene, Count, Sample) %>% 
+  pivot_wider(
+    names_from = Sample, 
+    values_from =  Count
+    ) %>% column_to_rownames("gene") %>%
+  as.matrix()
+
+head(df.diff.wide)
+
+```
+
+```{r}
+  # get the unique combinations of sample and group, arrange by group
+  # convert Sample and group columns to factors.
+  # Rows must be in the same order as the columns of the count matrix
+df.diff.design <- df.counts.f %>% 
+  distinct(Sample, Group) %>%
+  arrange(Group) %>%
+  mutate(
+    Sample = as.factor(Sample),
+    Group = as.factor(Group)
+  )
+head(df.diff.design)
+
+```
+
+Create the DESeq2 object and estimate size factors to apply counts normalization
+
+```{r}
+# create the deseq dataset
+deseq.dataset <- DESeqDataSetFromMatrix(
+  countData=as.matrix(df.diff.wide),
+  colData=df.diff.design,
+  design=~Group
+) %>%
+  estimateSizeFactors()
+
+# Change factor levels to compare CIN-High x CIN-low (default is alphabetical)
+deseq.dataset$Group <- factor(deseq.dataset$Group, levels = c("CIN-low","CIN-high"))
+
+```
+
+## Counts normalization
+
+The previous function call creates a DESeq2 object which, among many other things, contains the normalized counts and the estimated size factors.
+
+You can access the normalized counts from the DESeq object by calling the `counts` function with `normalized = TRUE`.
+
+```{r}
+# Get the size factors by using the `sizeFactors()` function and the created DESeq object
+deseq.dataset %>% sizeFactors() %>% 
+  enframe(name = "Sample", value = "size_factor") %>% 
+  arrange(Sample)
+
+deseq.dataset.norm <- deseq.dataset %>%
+  counts(normalized=TRUE) %>% as.data.frame()
+
+deseq.dataset.norm %>% rownames_to_column("gene") %>% head()
+
+# norm_counts <- DESeq2::counts(deseq.dataset, normalized=T) %>% as.data.frame() %>% rownames_to_column("gene")
+
+# norm_counts %>% write_csv2(file = paste0(source.output.dir, "/normalized_deseq_counts.csv"))
+
+deseq.dataset.norm.long <- deseq.dataset.norm %>% rownames_to_column("gene") %>% pivot_longer(cols = c(-gene), values_to = "counts", names_to = "Sample")
+deseq.dataset.norm.long %>% head()
+```
+
+```{r}
+# Plot total number of normalized counts, that used size factors from DESEq
+deseq.dataset.norm.long %>% 
+  group_by(Sample) %>%
+  summarise(
+    total_counts_norm = sum(counts)
+  ) %>%
+  ggplot(aes(x = Sample, y = total_counts_norm, fill= Sample)) +
+  geom_col() +
+  scale_fill_viridis_d() +
+  labs(x= "", y = "Total Counts per Sample", title = "Total normalized counts") + theme(plot.title = element_text(hjust= 0.5), legend.position = "hide") + scale_y_continuous(labels = scales::comma, breaks = seq(from = 0, to = 150000000, by = 10^7))
+```
+
+Make a boxplot to visualize the distribution of normalized counts, for every sample:
+
+```{r }
+# make boxplots for sample using the log2 transformed normalized (pseudo)counts
+deseq.dataset.norm.long %>% 
+  ggplot(aes(x = Sample, y = log2(counts+1), color = Sample)) + 
+  geom_boxplot() +
+labs(x= "Sample ID", y = "Log2 Counts", title = "Log2 count distribution") + theme(plot.title = element_text(hjust= 0.5), legend.position = "hide")
+
+# make a density using the log2 transformed normalized counts
+deseq.dataset.norm.long %>% ggplot(aes(log2(counts+1), col = Sample)) + geom_density()
+```
+
+## Dispersion estimation
+
+In RNA-seq count data there is a dependency between the variance and the mean that is addressed in the statistical procedures that are used for differential gene expression analysis. This plot visualizes the (overdispersed) mean-variance dependency in your normalized data:
+
+```{r}
+# create DESeq object
+dds <- DESeq(deseq.dataset)
+```
+
+```{r}
+resultsNames(dds)
+res <- results(dds)
+
+summary(res)
+```
+
+```{r}
+# Plot variance over mean of normalized counts to check overdispersion
+
+norm.counts <- counts(deseq.dataset, normalized=TRUE)
+
+df.mean.var <- tibble(
+  mean_counts = rowMeans(norm.counts),
+  var =  apply(norm.counts, 1, var)
+)
+
+df.mean.var %>% 
+  ggplot(aes(x = mean_counts, y = var)) +
+    geom_point(alpha = 0.2) +
+  labs(
+    title = "Mean-variance relationship",
+    x = "Mean log2(normalized counts) per gene",
+    y = "Variance of log2(normalized counts)"
+  ) +
+  geom_abline(intercept = 0, slope = 1, colour = "brown") +
+  scale_x_log10() +
+  scale_y_log10()
+
+rm(df.mean.var)
+```
+DESeq2 resolves this issue using regression and shrinkage:
+
+```{r}
+plotDispEsts(dds, log = "xy")
+```
+
+## Differential expression
+
+In order to extract the results of the DESeq analysis, we need to call the `results()` function on the previously created DESeq object. The following code extracts into a data.frame the log fold change, the p-values and adjusted p-values for differential expression. 
+
+```{r}
+#?lfcShrink
+resLFC <- lfcShrink(dds, coef = "Group_CIN.high_vs_CIN.low", type = "normal")
+
+resLFCapeglm <- lfcShrink(dds, coef = "Group_CIN.high_vs_CIN.low", type = "apeglm")
+
+
+df.deseq.results.noLFC <- res %>%
+  as.data.frame() %>%
+  rownames_to_column("gene")
+
+df.deseq.results <- resLFC %>%
+  as.data.frame() %>%
+  rownames_to_column("gene")
+
+
+df.deseq.resultsapeglm <- resLFCapeglm %>%
+  as.data.frame() %>%
+  rownames_to_column("gene")
+
+df.deseq.results %>% head()
+df.deseq.resultsapeglm %>% head()
+
+# df.deseq.results2 <- dds %>%
+#   lfcShrink(contrast=c("Group","CIN-high","CIN-low"), type = "normal") %>%
+#   as.data.frame() %>%
+#   rownames_to_column("gene")
+```
+```{r}
+df.deseq.results %>% left_join(df.deseq.resultsapeglm %>% select(gene, log2FoldChange), suffix = c(".normal", ".apeglm"), by= "gene") %>% ggplot(aes(x = log2FoldChange.normal, y = log2FoldChange.apeglm)) + geom_point() + geom_abline(slope = 1)
+```
+
+```{r}
+# Compare shrunk log fold changes with Z-statistic
+df.deseq.results.noLFC %>% select(gene, stat, pvalue) %>% left_join(
+  df.deseq.results %>% select(gene, log2FoldChange)
+) %>% ggplot(aes(x = stat, y = log2FoldChange, col= pvalue)) + 
+  geom_point() + geom_abline(slope = 1, alpha = 0.5) +
+  labs(x = "Z-statistic statistic", y = "Shrunk LFC")# + coord_flip()
+
+df.deseq.results.noLFC %>% select(gene, stat, pvalue) %>% left_join(
+  df.deseq.results %>% select(gene, log2FoldChange)
+) %>% ggplot(aes(x = stat/5, y = log2FoldChange, col= pvalue)) + 
+  geom_point() + geom_abline(slope = 1, alpha = 0.5) +
+  labs(x = "1/5 Z-statistic statistic", y = "Shrunk LFC")# + coord_flip()
+
+# + scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -1)
+```
+
+The results can be plotted in an MA plot:
+
+```{r}
+res %>% 
+  plotMA(ylim=c(-5,5))
+
+# MA plot on shrunken Log2 Fold Changes, also removes the ones with low counts
+resLFC  %>% 
+  plotMA(ylim=c(-5,5))
+```
+
+```{r}
+# Check how many genes have an adj p-value < 0.01
+df.deseq.results %>% filter(padj < 0.01) %>% select(gene) %>% n_distinct()
+```
+
+Draw an histogram of the p-values and the adjusted p-values
+
+```{r}
+# histogram of pvalues
+df.deseq.results %>% 
+  ggplot(aes(pvalue)) + geom_histogram() +   labs(
+    title = "DESeq2 p-value distribution", 
+    x = "DESeq2 P-value", 
+    y = "Number of genes"
+  ) +  # you can add two ggplot objects with `+` with the patchwork package
+  df.deseq.results %>% 
+  ggplot(aes(padj)) + geom_histogram() +   labs(
+    title = "DESeq2 Adjusted p-value distribution", 
+    x = "DESeq2 adjusted P-value", 
+    y = "Number of genes"
+  )
+ # histogram of adj pvalues
+```
+
+## Volcano plot
+```{r}
+alpha = 1e-15
+log2FCthresh = 3
+df.deseq.results <- df.deseq.results %>% mutate(
+  within_threshold = (padj < alpha & abs(log2FoldChange) > log2FCthresh)
+)
+
+#df.volcano <- df.deseq.results %>% mutate(threshold = (abs(log2FoldChange) > 2 & padj < alpha))
+
+df.deseq.results %>% ggplot(
+  aes(x=log2FoldChange , y= -log10(padj + 1e-200), col = within_threshold)) +     geom_point(alpha = 0.5) +
+geom_vline(xintercept = 0, col = "black") + 
+geom_vline(xintercept = c(-log2FCthresh, log2FCthresh), col = "red") +   geom_hline(yintercept = -log10(alpha), colour = "red") + 
+geom_text_repel(
+  aes(x = log2FoldChange, y = -log10(padj + 1e-200), label = gene), data = df.deseq.results %>% filter(within_threshold), colour = "grey20", min.segment.length = 0
+  ) +
+  theme(legend.position = "none", plot.title = element_text(hjust= 0.5)) +
+  labs(
+    title = "Volcano plot", 
+    x = "Effect size: log2(fold-change)", 
+    y = "-log10(adjusted p-value)"
+  ) + ylim(0, 50) + 
+  scale_x_continuous(breaks = seq(-6,9, by = 1))
+
+if (export){
+  #png(filename = paste0(source.output.dir, "/volcano_plot_strict.png"), width=600, height=600)
+  ggsave(file = paste0(source.output.dir, "/volcano_plot_strict.png"), width=6, height=4, dpi=300)
+}
+
+```
+
+```{r}
+alpha = 0.001
+log2FCthresh = 2
+df.deseq.results <- df.deseq.results %>% mutate(
+  within_threshold = (padj < alpha & abs(log2FoldChange) > log2FCthresh)
+)
+
+#df.volcano <- df.deseq.results %>% mutate(threshold = (abs(log2FoldChange) > 2 & padj < alpha))
+
+df.deseq.results %>% ggplot(
+  aes(x=log2FoldChange , y= -log10(padj + 1e-200), col = within_threshold)) +     geom_point(alpha = 0.5) +
+geom_vline(xintercept = 0, col = "black") + 
+geom_vline(xintercept = c(-log2FCthresh, log2FCthresh), col = "red") +   geom_hline(yintercept = -log10(alpha), colour = "red") + 
+geom_text_repel(
+  aes(x = log2FoldChange, y = -log10(padj + 1e-200), label = gene), data = df.deseq.results %>% filter(within_threshold), colour = "grey20", min.segment.length = 0) +
+  theme(legend.position = "none", plot.title = element_text(hjust= 0.5)) +
+  labs(
+    title = "Volcano plot", 
+    x = "Effect size: log2(fold-change)", 
+    y = "-log10(adjusted p-value)"
+  ) + ylim(0, 50) + 
+  scale_x_continuous(breaks = seq(-6,9, by = 1))
+
+if (export){
+  #png(filename = paste0(source.output.dir, "/volcano_plot.png"), width=600, height=600)
+  ggsave(file = paste0(source.output.dir, "/volcano_plot.png"), width=6, height=4, dpi=300)
+}
+
+```
+
+```{r}
+  # filter
+df.deseq.results %>%
+  filter(within_threshold == TRUE) %>% nrow()
+
+df.deseq.results %>%
+  filter(within_threshold == TRUE) %>%
+  arrange(-log2FoldChange, padj) %>% head()
+```
+
+## Export
+```{r}
+if (export){
+  df.deseq.results_map <- df.deseq.results %>% left_join(gene_ensembl_db %>% select(gene, gene_name, symbol) %>% unique())
+  
+  # Add a column for negative log10 of pvalues
+  df.deseq.results_map <- df.deseq.results_map %>% mutate(neglog10padj = ifelse(padj != 0, -log10(padj), NA))
+  
+  
+  # Export data
+  df.deseq.results_map %>% write_csv2(file = paste0(source.output.dir, "/bulk_transcriptomics_deseq.csv"))
+  
+  df.deseq.results.noLFC %>% left_join(gene_ensembl_db %>% select(gene, gene_name, symbol) %>% unique()) %>% mutate(neglog10padj = ifelse(padj != 0, -log10(padj), NA))  %>% write_csv2(file = paste0(source.output.dir, "/bulk_transcriptomics_deseq_noLFC.csv"))
+  
+  # DE genes using symmetrical threshold
+  df.deseq.results_map %>% filter(within_threshold == TRUE) %>% write_csv2(paste0(source.output.dir, "/CIN-diff_deseq_DE_", alpha, "_FC", log2FCthresh, ".csv"))
+  
+  # Genes up-regulated in CIN-high
+  alpha_up = 0.001
+  log2FCthresh_up = 1.75
+  n_genes_up <- df.deseq.results_map %>% filter(padj < alpha_up & log2FoldChange > log2FCthresh_up) %>% nrow()
+  
+  df.deseq.results_map %>% filter(padj < alpha_up & log2FoldChange > log2FCthresh_up) %>% select(gene, gene_name, symbol) %>% write_csv2(paste0(source.output.dir, "/CIN-high-up_", alpha_up, "_FC_", log2FCthresh_up, "_n", n_genes_up, ".csv"), quote = FALSE)
+  
+  # Genes down-regulated in CIN-high
+  alpha_down = 0.05
+  log2FCthresh_down = -1
+  n_genes_down <- df.deseq.results_map %>% filter(padj < alpha_down & log2FoldChange < log2FCthresh_down) %>% nrow()
+  
+  df.deseq.results_map %>% filter(padj < alpha_down & log2FoldChange < log2FCthresh_down) %>% select(gene, gene_name, symbol) %>% write_csv2(paste0(source.output.dir, "/CIN-high-down_", alpha_down, "_FC_", log2FCthresh_down, "_n", n_genes_down, ".csv"), quote = FALSE)
+}
+```
+
+```{r}
+if(export){
+  # Export normalized counts in the specific .txt format for GSEA analysis
+  # Description column is required, wasn't able to import in GSEA with "na" value
+  # Adding pseudocounts (0.1) to prevent 0 values in GSEA
+  norm.pseudocounts <- norm.counts + 0.1
+  
+  # Use gene symbols for GSEA
+  norm.pseudocounts.df <- norm.pseudocounts %>% as.data.frame() %>% rownames_to_column("gene") %>% left_join(
+    gene_ensembl_db %>% select(gene, gene_name, symbol) %>% unique()
+    )
+  
+  # If the gene symbol is not available, use the gene column instead (as named in the counts df)
+  norm.pseudocounts.df <- norm.pseudocounts.df %>% mutate(gene_symbol = ifelse(is.na(symbol), gene, symbol)) 
+  
+  norm.pseudocounts.df <- norm.pseudocounts.df %>% select(-c(gene, gene_name, symbol)) %>% 
+    relocate(gene_symbol, 1) %>% dplyr::rename("NAME" = gene_symbol)
+  
+  
+  # Take the sum of all counts for genes with the same name (symbol)
+  norm.pseudocounts.df <- norm.pseudocounts.df %>% group_by(NAME) %>% summarize_all(.funs = sum) %>% ungroup() %>% mutate("DESCRIPTION" = 1) %>% relocate(DESCRIPTION, .after = NAME)
+  
+  # Export normalized (pseudo)counts
+  norm.pseudocounts.df %>% write.table(file = paste0(source.output.dir, "/GSEA_CIN_high_low_pseudo.txt"), sep = "\t", row.names = FALSE, quote = FALSE)
+  
+  
+  # Export ranked list for pre-ranked GSEA using shrunk log2fold changes 
+  # As the preranked GSEA can be run with gene symbols, use those instead of the IDs
+  df.deseq.results_map %>% arrange(-log2FoldChange) %>% mutate(gene_symbol = ifelse(is.na(symbol), gene, symbol)) %>% select(gene_symbol, log2FoldChange) %>% dplyr::rename("NAME" = gene_symbol) %>% write.table(file = paste0(source.output.dir, "/GSEA_preranked_CIN_high_low.rnk"), sep = "\t", row.names = FALSE, quote = FALSE)
+  
+}
+```
+
+# Load msigdb hallmarks gene set
+```{r}
+all_gene_sets <- msigdbr("Homo sapiens")
+
+msigdb_hallmarks_set <- filter(all_gene_sets, gs_cat == "H") %>% select(gs_name, gene_symbol)
+
+msigdb_hallmarks_set <- split(msigdb_hallmarks_set$gene_symbol, msigdb_hallmarks_set$gs_name)
+
+msigdb_hallmarks_names <- read.csv2("data/names_hallmarks.csv")
+
+rm(all_gene_sets)
+# Another option is loading files with gene sets
+# msigdb_hallmarks <- gmtPathways("data/h.all.v7.4.symbols.gmt")
+# msigdb_hallmarks %>% head() %>% lapply(head)
+
+```
+
+# FGSEA Shrunk LFC
+```{r}
+CIN_fc_rnk <- df.deseq.results %>% select(gene, log2FoldChange) %>% deframe()
+
+fgseaRes <- fgsea(pathways = msigdb_hallmarks_set, 
+                  stats    = CIN_fc_rnk,
+                  minSize  = 15,
+                  maxSize  = 500)
+
+fgseaRes <- fgseaRes %>% mutate(within_threshold = padj < 0.3, "Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low")) %>% left_join(msigdb_hallmarks_names)
+
+fgseaRes %>% select(padj, NES) %>% summary()
+
+# plotEnrichment(msigdb_hallmarks_set[["HALLMARK_KRAS_SIGNALING_UP"]],
+#                CIN_fc_rnk) + labs(title="KRAS Signaling")
+# 
+# plotEnrichment(msigdb_hallmarks_set[["HALLMARK_INFLAMMATORY_RESPONSE"]],
+#                CIN_fc_rnk) + labs(title="Inflammatory Response")
+# 
+# plotEnrichment(msigdb_hallmarks_set[["HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION"]],
+#                CIN_fc_rnk) + labs(title="EMT")
+# 
+
+fgseaRes %>% mutate(padj = ifelse(padj < 0.001, 0.00101, padj)) %>% ggplot(aes(x = log10(padj), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(padj), y = NES, label = name), data = fgseaRes %>% filter(within_threshold | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) +
+  labs(x = "log10(FDRq)", y = "Normalized Enrichment Score", col = "Enriched in") + 
+  scale_y_continuous(limits = c(-2,2), breaks = seq(-2,2,1)) + 
+  scale_x_continuous(trans = "reverse", limits = c(0, -3), breaks = c(-3, -2, -1, 0) , labels = c("<0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+
+
+if (export){
+#png(filename = paste0(source.output.dir,"/fGSEA_bulk_results_shrunkfc.png"), width=800, height=500)
+ggsave(file = paste0(source.output.dir,"/fGSEA_bulk_results_shrunkfc.png"), width=6, height=4, dpi=300)
+
+fgseaRes %>% select(-leadingEdge) %>% write.csv2(file =  paste0(source.output.dir,"/bulk_fgsea_shrunkfc_CIN_highlow.csv"), row.names = FALSE)
+}
+
+fgseaRes <- read.csv2(file = paste0(source.output.dir,"/bulk_fgsea_shrunkfc_CIN_highlow.csv"))
+```
+# FGSEA not shrunk LFC
+```{r}
+CIN_fc_rnk <- df.deseq.results.noLFC %>% select(gene, log2FoldChange) %>% deframe()
+
+fgseaRes.noLFC <- fgsea(pathways = msigdb_hallmarks_set, 
+                  stats    = CIN_fc_rnk,
+                  minSize  = 15,
+                  maxSize  = 500)
+
+fgseaRes.noLFC <- fgseaRes.noLFC %>% mutate(within_threshold = padj < 0.01, "Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low")) %>% left_join(msigdb_hallmarks_names)
+
+# plotEnrichment(msigdb_hallmarks_set[["HALLMARK_KRAS_SIGNALING_UP"]],
+#                CIN_fc_rnk) + labs(title="KRAS Signaling")
+# 
+# plotEnrichment(msigdb_hallmarks_set[["HALLMARK_INFLAMMATORY_RESPONSE"]],
+#                CIN_fc_rnk) + labs(title="Inflammatory Response")
+# 
+# plotEnrichment(msigdb_hallmarks_set[["HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION"]],
+#                CIN_fc_rnk) + labs(title="EMT")
+# 
+
+fgseaRes.noLFC %>% ggplot(aes(x = log10(padj), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(padj), y = NES, label = name), data = fgseaRes.noLFC %>% filter(within_threshold | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) +
+  labs(x = "log10(FDRq)", y = "Normalized Enrichment Score", col = "Enriched in") + 
+  scale_y_continuous(limits = c(-2,2), breaks = seq(-2,2,1)) + 
+  scale_x_continuous(trans = "reverse") + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+
+if (export){
+#png(filename = paste0(source.output.dir,"/fGSEA_bulk_results_fc.png"), width=800, height=500)
+ggsave(file = paste0(source.output.dir,"/fGSEA_bulk_results_fc.png"), width=8, height=5, dpi=300)
+
+fgseaRes.noLFC %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir,"/bulk_fgsea_notshrunkfc_CIN_highlow.csv"), row.names = FALSE)
+}
+
+fgseaRes.noLFC <- read.csv2(file = paste0(source.output.dir,"/bulk_fgsea_notshrunkfc_CIN_highlow.csv"))
+```
+
+# FGSEA not shrunk Z-Stat
+```{r}
+CIN_fc_rnk <- df.deseq.results.noLFC %>% select(gene, stat) %>% deframe()
+
+fgseaRes.noLFC.stat <- fgsea(pathways = msigdb_hallmarks_set, 
+                  stats    = CIN_fc_rnk,
+                  minSize  = 15,
+                  maxSize  = 500)
+
+fgseaRes.noLFC.stat <- fgseaRes.noLFC.stat %>% mutate(within_threshold = padj < 0.01, "Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low")) %>% left_join(msigdb_hallmarks_names)
+
+# plotEnrichment(msigdb_hallmarks_set[["HALLMARK_KRAS_SIGNALING_UP"]],
+#                CIN_fc_rnk) + labs(title="KRAS Signaling")
+# 
+# plotEnrichment(msigdb_hallmarks_set[["HALLMARK_INFLAMMATORY_RESPONSE"]],
+#                CIN_fc_rnk) + labs(title="Inflammatory Response")
+# 
+# plotEnrichment(msigdb_hallmarks_set[["HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION"]],
+#                CIN_fc_rnk) + labs(title="EMT")
+# 
+fgseaRes.noLFC.stat %>% select(pval) %>% summary()
+
+fgseaRes.noLFC.stat %>% ggplot(aes(x = log10(padj), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(padj), y = NES, label = name), data = fgseaRes.noLFC.stat %>% filter(within_threshold | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) +
+  labs(x = "log10(FDRq)", y = "Normalized Enrichment Score", col = "Enriched in") + 
+  scale_y_continuous(limits = c(-3,3), breaks = seq(-3,3,1)) + 
+  scale_x_continuous(trans = "reverse") + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+
+if (export){
+#png(filename = paste0(source.output.dir,"/fGSEA_bulk_results_Zstat.png"), width=800, height=500)
+ggsave(file = paste0(source.output.dir,"/fGSEA_bulk_results_Zstat.png"), width=8, height=5, dpi=300)
+
+fgseaRes.noLFC.stat %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir,"/bulk_fgsea_Zstat_CIN_highlow.csv"), row.names = FALSE)
+}
+
+fgseaRes.noLFC.stat <- read.csv2(file = paste0(source.output.dir,"/bulk_fgsea_Zstat_CIN_highlow.csv"))
+
+```
+
+# Original GSEA
+```{r}
+Bulk_gsea <- read.csv2("data/Supp_table6.csv")
+
+Bulk_gsea <- Bulk_gsea %>% left_join(msigdb_hallmarks_names %>% rename(NAME = pathway)) %>% mutate("Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low"))
+		
+Bulk_gsea %>% select(NES, FDR.q.val) %>% summary()
+
+Bulk_gsea %>% mutate(FDR.q.val = ifelse(FDR.q.val < 0.001, 0.00101, FDR.q.val)) %>% ggplot(aes(x = log10(FDR.q.val), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(FDR.q.val), y = NES, label = name), data = Bulk_gsea %>% mutate(FDR.q.val = ifelse(FDR.q.val < 0.001, 0.00101, FDR.q.val)) %>% filter(name %in% c("Apical Surface", "MYC Targets V1", "IFN-a Response", "IFN-y Response", "OxPhos", "TGF-B Signaling", "EMT", "IL2-STAT5 Signaling", "Wnt B-Catenin Signaling", "TNF-a Signaling via NKFB", "Inflammatory Response", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+  ) +
+  labs(x = "log10(FDRq)", y = "Normalized Enrichment Score", col = "Enriched in") + 
+  scale_y_continuous(limits = c(-2,2.5), breaks = seq(-2,2.5,1)) + 
+  scale_x_continuous(trans = "reverse", limits = c(0, -3), breaks = c(-3, -2, -1, 0) , labels = c("<0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+
+if(export){
+  #png(filename = paste0(source.output.dir,"/GSEA_results.png"), width=600, height=600)
+  ggsave(file = paste0(source.output.dir,"/orig_GSEA_results.png"), width=6, height=4, dpi=300)
+}
+
+```
+
+# Compare FGSEA and original GSEA NES
+```{r}
+# fGSEA x original GSEA
+fGSEA_comp <- Bulk_gsea %>% select(NAME, NES, FDR.q.val) %>% rename(orig_NES = NES, orig_FDR.q.val = FDR.q.val) %>% left_join(
+  fgseaRes %>% select(pathway, NES, pval, padj) %>% rename(NAME = pathway)
+  ) %>% 
+  left_join(
+  msigdb_hallmarks_names %>% rename(NAME = pathway)
+  ) %>% mutate(sign_agreement = sign(orig_NES) == sign(NES))
+
+fGSEA_comp %>% ggplot(aes(x = orig_NES, y = NES, col = log10(padj), shape = padj < 0.2)) + 
+  geom_point() + geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = orig_NES, y = NES, label = name), data = fGSEA_comp %>% filter(!sign_agreement | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + labs(x = "Orig GSEA NES", y = "fGSEA NES") +
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -1)
+
+if(export){
+  #png(filename=paste0(source.output.dir,"/fGSEA_x_orig.png"), width=600, height=600)
+  ggsave(file=paste0(source.output.dir,"/fGSEA_x_orig.png"), width=6, height=4, dpi=300)
+}
+
+
+# Compare GSEA FDRq values
+fGSEA_comp %>% ggplot(aes(x=orig_FDR.q.val, y= padj, col = NES)) + geom_point() + geom_abline(slope = 1)  + labs(x = "orig_FDR.q.val", y = "FDR.q.val") +
+  scale_color_gradient2(low="blue", mid = "white", high="red", midpoint = 0) + 
+  geom_text_repel(
+    aes(x = orig_FDR.q.val, y = padj, label = name), data = fGSEA_comp %>% filter(!sign_agreement ), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) 
+
+if(export){
+  ggsave(file=paste0(source.output.dir,"/fGSEA_x_orig.fdr.png"), width=6, height=4, dpi=300)
+}
+```
+# Compare not shrunk FGSEA and original GSEA NES
+```{r}
+# fGSEA x Bulk
+fGSEA_comp <- Bulk_gsea %>% select(NAME, NES, FDR.q.val) %>% rename(orig_NES = NES, orig_FDR.q.val = FDR.q.val) %>% left_join(
+  fgseaRes.noLFC %>% select(pathway, NES, pval, padj) %>% rename(NAME = pathway)
+  ) %>% 
+  left_join(
+  msigdb_hallmarks_names %>% rename(NAME = pathway)
+  ) %>% mutate(sign_agreement = sign(orig_NES) == sign(NES))
+
+fGSEA_comp %>% ggplot(aes(x = orig_NES, y = NES, col = log10(padj), shape = padj < 0.2)) + 
+  geom_point() + geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = orig_NES, y = NES, label = name), data = fGSEA_comp %>% filter(!sign_agreement | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + labs(x = "Orig GSEA NES", y = "fGSEA NES") +
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -1)
+
+if(export){
+  #png(filename = paste0(source.output.dir,"/notshrunk_fGSEA_x_orig.png"), width=600, height=600)
+  ggsave(file = paste0(source.output.dir,"/notshrunk_fGSEA_x_orig.png"), width=6, height=4, dpi=300)
+}
+```
+
+# Compare Z-stat FGSEA and original GSEA NES
+```{r}
+# fGSEA x Bulk
+fGSEA_comp <- Bulk_gsea %>% select(NAME, NES, FDR.q.val) %>% rename(orig_NES = NES, orig_FDR.q.val = FDR.q.val) %>% left_join(
+  fgseaRes.noLFC.stat %>% select(pathway, NES, pval, padj) %>% rename(NAME = pathway)
+  ) %>% 
+  left_join(
+  msigdb_hallmarks_names %>% rename(NAME = pathway)
+  ) %>% mutate(sign_agreement = sign(orig_NES) == sign(NES))
+
+fGSEA_comp %>% ggplot(aes(x = orig_NES, y = NES, col = log10(padj), shape = padj < 0.2)) + 
+  geom_point() + geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = orig_NES, y = NES, label = name), data = fGSEA_comp %>% filter(!sign_agreement | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + labs(x = "Orig GSEA NES", y = "fGSEA NES") +
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -3)
+
+if(export){
+  ggsave(file=paste0(source.output.dir,"/statfGSEA_x_orig.png"), width=6, height=4, dpi=300)
+}
+
+# Compare GSEA FDRq values
+fGSEA_comp %>% ggplot(aes(x=orig_FDR.q.val, y= padj, col = NES)) + geom_point() + geom_abline(slope = 1)  + labs(x = "orig_FDR.q.val", y = "FDR.q.val") +
+  scale_color_gradient2(low="blue", mid = "white", high="red", midpoint = 0)
+
+if(export){
+  #png(filename=paste0(source.output.dir,"/GSEA_x_orig.png"), width=600, height=600)
+  ggsave(file=paste0(source.output.dir,"/statfGSEA_x_orig,fdr.png"), width=6, height=4, dpi=300)
+}
+```
+
+# Variance Stabilizing Transform
+```{r}
+# Apply a variance stabilizing transform
+vsd <- vst(dds, blind=FALSE)
+vsd %>% assay() %>% head()
+
+```
+
+```{r}
+# Heatmap on VSD data using top n most expressed genes
+select <- order(rowMeans(counts(dds,normalized=TRUE)),
+                decreasing=TRUE)[1:200]
+df <- as.data.frame(colData(dds)[,c("Sample","Group")])
+pheatmap(assay(vsd)[select,], cluster_rows=FALSE, show_rownames=FALSE,
+         cluster_cols=FALSE, annotation_col=df)
+
+```
+
+```{r}
+# Heatmap of sample distances
+sampleDists <- dist(t(assay(vsd)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- vsd$Group
+colnames(sampleDistMatrix) <- vsd$Sample
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+heatmap <- pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors, legend = FALSE, treeheight_row = 0,
+         treeheight_col = 50, fontsize =16)
+
+save_pheatmap_png <- function(x, filename, width=800, height=800, res = 300) {
+  png(filename, width = width, height = height, res = res)
+  grid::grid.newpage()
+  grid::grid.draw(x$gtable)
+  dev.off()
+}
+
+if(export){
+save_pheatmap_png(heatmap, filename = paste0(source.output.dir, "/sample_clustering.png"))
+}
+
+```
+
+# Perform PCA on VST data
+```{r}
+plotPCA(vsd, intgroup=c("Group"), returnData = TRUE)
+# plotPCA(vsd, intgroup=c("Group"))
+
+plotPCA(vsd, intgroup=c("Group")) +
+geom_text_repel(
+  aes(x = PC1, y = PC2, label = name), data = plotPCA(vsd, intgroup=c("Group"), returnData = TRUE))
+
+if(export){
+ggsave(file = paste0(source.output.dir,"/vst_pca.png"), width=4.5, height=4, dpi=300)
+}
+
+```
+
+```{r}
+df.deseq.results_map <- read_csv2(file = paste0(source.output.dir, "/bulk_transcriptomics_deseq.csv"))
+  
+df.deseq.results.noLFC <- read_csv2(file = paste0(source.output.dir, "/bulk_transcriptomics_deseq_noLFC.csv"))
+```
+
+# Comparing CIN signature
+```{r}
+CIN_signature <- c('PELI2','BMP2','SHH','TNS4','RAB3B','ROBO1','ARHGAP28','CHN2','CST1','F13A1','CPVL','SEMA6D','NHSL2','GTF2IP7','DPYSL3','PCDH7','KHDRBS3','TRAC','TMEM156', 'CST4','CD24','FGF5','NTN4')
+
+alpha = 1e-15
+log2FCthresh = 3
+#df.volcano <- df.deseq.results %>% mutate(threshold = (abs(log2FoldChange) > 2 & padj < alpha))
+df.deseq.results_map <- df.deseq.results_map %>% mutate(within_threshold = abs(log2FoldChange) >= log2FCthresh & pvalue <= alpha)
+             
+df.deseq.results.noLFC <- df.deseq.results.noLFC %>% mutate(within_threshold = abs(log2FoldChange) >= log2FCthresh & pvalue <= alpha)
+
+# All genes are present
+CIN_signature %in% df.deseq.results_map$gene
+
+# Genes in volcano plot quadrant
+CIN_signature %in% (df.deseq.results_map %>% filter(within_threshold))$gene
+
+CIN_signature[!CIN_signature %in% (df.deseq.results_map %>% filter(within_threshold))$gene]
+
+CIN_signature[!CIN_signature %in% (df.deseq.results.noLFC %>% filter(within_threshold))$gene]
+
+
+CIN_signature[!CIN_signature %in% (df.deseq.results.noLFC %>% filter(within_threshold))$gene]
+
+df.deseq.results.noLFC %>% ggplot(
+  aes(x=log2FoldChange , y= -log10(padj + 1e-200), col = within_threshold)) +     geom_point(alpha = 0.5) +
+geom_vline(xintercept = 0, col = "black") + 
+geom_vline(xintercept = c(-log2FCthresh, log2FCthresh), col = "red") +   geom_hline(yintercept = -log10(alpha), colour = "red") + 
+geom_text_repel(
+  aes(x = log2FoldChange, y = -log10(padj + 1e-200), label = gene), data = df.deseq.results.noLFC %>% filter(symbol %in% CIN_signature), colour = "grey20", min.segment.length = 0, max.overlaps = 20
+  ) +
+  theme(legend.position = "none", plot.title = element_text(hjust= 0.5)) +
+  labs(
+    title = "Volcano plot", 
+    x = "Effect size: log2(fold-change)", 
+    y = "-log10(adjusted p-value)"
+  ) + ylim(0, 50) + 
+  scale_x_continuous(breaks = seq(-6,9, by = 1))
+
+if (export){
+  #png(filename = paste0(source.output.dir, "/volcano_plot_strict.png"), width=600, height=600)
+  ggsave(file = paste0(source.output.dir, "/volcano_plot_noLFC_CIN_signature.png"), width=6, height=4, dpi=300)
+}
+
+df.deseq.results.noLFC %>% filter(gene == "SEMA6D")
+
+df.deseq.results.noLFC %>% ggplot(
+  aes(x=log2FoldChange , y= -log10(pvalue + 1e-200), col = within_threshold)) +     geom_point(alpha = 0.5) +
+geom_vline(xintercept = 0, col = "black") + 
+geom_vline(xintercept = c(-log2FCthresh, log2FCthresh), col = "red") +   geom_hline(yintercept = -log10(alpha), colour = "red") + 
+geom_text_repel(
+  aes(x = log2FoldChange, y = -log10(pvalue + 1e-200), label = gene), data = df.deseq.results.noLFC %>% filter(within_threshold), colour = "grey20", min.segment.length = 0
+  ) +
+  theme(legend.position = "none", plot.title = element_text(hjust= 0.5)) +
+  labs(
+    title = "Volcano plot", 
+    x = "Effect size: log2(fold-change)", 
+    y = "-log10(p-value)"
+  ) + ylim(0, 50) + 
+  scale_x_continuous(breaks = seq(-6,9, by = 1))
+
+if (export){
+  #png(filename = paste0(source.output.dir, "/volcano_plot_strict.png"), width=600, height=600)
+  ggsave(file = paste0(source.output.dir, "/volcano_plot_noLFC_strict.png"), width=6, height=4, dpi=300)
+}
+
+df.deseq.results.noLFC %>% filter(within_threshold, log2FoldChange > 0)
+```
+
+# Original data
+```{r}
+df.deseq.results.orig <- read_excel(paste0(source.output.dir, "/MS_CINHighvsLow.xlsx"))
+
+deseq.norm.orig <- read_excel("data/Raw-Data.xlsx")
+
+colnames(deseq.norm.orig)
+colnames(deseq.norm.orig) <- c("gene","MK_orig","Kb_orig","MKH_orig","cont_orig","Ka_orig")
+
+column_names <- colnames(df.deseq.results.orig)
+# column_names <- replace(column_names, column_names == "...1", "gene")
+
+column_names <- paste0("orig_", column_names)
+column_names <- replace(column_names, column_names == "orig_...1", "gene")
+
+colnames(df.deseq.results.orig) <- column_names
+```
+
+```{r}
+deseq.noLFC.c <- df.deseq.results.noLFC %>% left_join(df.deseq.results.orig, by = "gene")
+
+deseq.c <- df.deseq.results %>% left_join(df.deseq.results.orig, by = "gene")
+
+deseq.c %>% ggplot(aes(x = log2FoldChange, y = orig_log2FoldChange)) + geom_point() + geom_abline(slope = 1) + labs(x = "normal Log2FC", y = "original Log2FC")
+
+if (export){
+#png(filename = paste0(source.output.dir,"/fGSEA_bulk_results_fc.png"), width=800, height=500)
+ggsave(file = paste0(source.output.dir,"/shrunkLFC_x_orig.png"), width=6, height=4, dpi=300)
+}
+
+deseq.noLFC.c %>% ggplot(aes(x = log2FoldChange, y = orig_log2FoldChange)) + geom_point() + geom_abline(slope = 1)
+
+if (export){
+#png(filename = paste0(source.output.dir,"/fGSEA_bulk_results_fc.png"), width=800, height=500)
+ggsave(file = paste0(source.output.dir,"/not_shrunkLFC_x_orig.png"), width=6, height=4, dpi=300)
+}
+
+deseq.glm.c <- df.deseq.resultsapeglm %>% left_join(df.deseq.results.orig, by = "gene")
+
+deseq.glm.c %>% ggplot(aes(x = log2FoldChange, y = orig_log2FoldChange)) + geom_point() + geom_abline(slope = 1) + labs(x = "apeglm Log2FC", y = "original Log2FC")
+if (export){
+#png(filename = paste0(source.output.dir,"/fGSEA_bulk_results_fc.png"), width=800, height=500)
+ggsave(file = paste0(source.output.dir,"/apeglm_shrunkLFC_x_orig.png"), width=6, height=4, dpi=300)
+}
+```
+# FGSEA original
+```{r}
+CIN_fc_rnk_orig <- df.deseq.results.orig %>% select(gene, orig_log2FoldChange) %>% deframe()
+
+fgseaRes.orig <- fgsea(pathways = msigdb_hallmarks_set, 
+                  stats    = CIN_fc_rnk_orig,
+                  minSize  = 15,
+                  maxSize  = 500)
+
+fgseaRes.orig <- fgseaRes.orig %>% mutate(within_threshold = padj < 0.05, "Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low")) %>% left_join(msigdb_hallmarks_names)
+
+# fgseaRes.orig %>% select(NES,padj) %>% summary()
+
+fgseaRes.orig %>% mutate(padj = ifelse(padj < 0.001, 0.00101, padj)) %>% ggplot(aes(x = log10(padj), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(padj), y = NES, label = name), data = fgseaRes.orig %>% filter(within_threshold) %>% mutate(padj = ifelse(padj < 0.001, 0.00101, padj)), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) +
+  labs(x = "log10(FDRq)", y = "Normalized Enrichment Score", col = "Enriched in") + 
+  scale_y_continuous(limits = c(-2,2.5), breaks = seq(-2,2.5,1)) + 
+  scale_x_continuous(trans = "reverse", limits = c(0, -3), breaks = c(-3, -2, -1, 0) , labels = c("<0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+
+if (export){
+#png(filename = paste0(source.output.dir,"/fGSEA_bulk_results_fc.png"), width=800, height=500)
+ggsave(file = paste0(source.output.dir,"/fGSEA_bulk_results_orig_fc.png"), width=8, height=5, dpi=300)
+}
+
+# fgseaRes.noLFC <- read.csv2(file = paste0(source.output.dir,"/bulk_fgsea_notshrunkfc_CIN_highlow.csv"))
+```
+
+```{r}
+# fGSEA x original GSEA
+fGSEA_orig_comp <- Bulk_gsea %>% select(NAME, NES, FDR.q.val) %>% rename(orig_NES = NES, orig_FDR.q.val = FDR.q.val) %>% left_join(
+  fgseaRes.orig %>% select(pathway, NES, pval, padj) %>% rename(NAME = pathway)
+  ) %>% 
+  left_join(
+  msigdb_hallmarks_names %>% rename(NAME = pathway)
+  ) %>% mutate(sign_agreement = sign(orig_NES) == sign(NES))
+
+fGSEA_orig_comp %>% ggplot(aes(x = orig_NES, y = NES, col = log10(padj), shape = padj < 0.2)) + 
+  geom_point() + geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = orig_NES, y = NES, label = name), data = fGSEA_orig_comp %>% filter(!sign_agreement), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + labs(x = "Orig GSEA NES", y = "fGSEA NES") +
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -1)
+```
+

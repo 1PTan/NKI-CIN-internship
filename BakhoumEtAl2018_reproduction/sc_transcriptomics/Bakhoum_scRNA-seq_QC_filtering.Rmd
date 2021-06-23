@@ -173,4 +173,39 @@ saveRDS(scRNA_c, file = paste0(source.output.dir, "/scRNA_c.rds"))
   }
 ```
 
+# Export filtered data as csv
+```{r}
+if(export){
+kif2bf <- as.matrix(Seurat::GetAssayData(kif2b_f, assay = "RNA"))
+MCAKf <- as.matrix(Seurat::GetAssayData(MCAK_f, assay = "RNA"))
+dnMCAKf <- as.matrix(Seurat::GetAssayData(dnMCAK_f, assay = "RNA"))
+
+scRNA_mat <- as.matrix(Seurat::GetAssayData(scRNA_c, assay = "RNA"))
+
+kif2bf %>% write.csv2(file = paste0(source.output.dir, "/kif2bf.csv"))
+MCAKf %>% write.csv2(file = paste0(source.output.dir, "/MCAKf.csv"))
+dnMCAKf %>% write.csv2(file = paste0(source.output.dir, "/dnMCAKf.csv"))
+
+scRNA_mat %>% write.csv2(file = paste0(source.output.dir, "/cin_dataf.csv"))
+
+
+dim(kif2bf)
+kif2bf_subset <- kif2bf[1:8000, 1:800]
+kif2bf_subset %>% write.csv2(file = paste0(source.output.dir, "/kif2bf_subset.csv"))
+
+kif2bf_subset_df <- kif2bf_subset %>% as.data.frame()
+kif2bf_subset_df %>% rowMeans()
+}
+
+rm(dnMCAKf, MCAKf, kif2bf)
+```
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+# packageVersion("DESeq2")
+# packinfo <- installed.packages(fields = c("Package", "Version"))
+# packinfo[,c("Package", "Version")]
+# packinfo["graphics",c("Package", "Version")]
+
+```
 

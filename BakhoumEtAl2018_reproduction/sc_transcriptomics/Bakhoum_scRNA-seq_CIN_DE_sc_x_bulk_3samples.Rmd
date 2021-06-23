@@ -1,0 +1,1568 @@
+---
+title: "Bakhoum et al 2018 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+#BiocManager::install("fgsea", "GO.db", "GOstats", "org.Hs.eg.db", "glmGamPoi", "DESeq2")
+
+# install.packages("Seurat", "patchwork", "ggrepel", "sparseMatrixStats", "msigdbr", "tidyverse", "proxy", "plotly", "pheatmap", "gplots")
+
+library(Seurat)
+library(patchwork)
+library(ggrepel)
+library(sparseMatrixStats)
+library(msigdbr)
+library(GO.db)
+library(GOstats)
+library(org.Hs.eg.db)
+library(tidyverse)
+library(proxy)
+library(fgsea)
+library(plotly)
+library(pheatmap)
+library(gplots)
+library(glmGamPoi)
+library(DESeq2)
+
+set.seed(42)
+select = dplyr::select
+rename = dplyr::rename
+```
+
+# Loading data
+```{r}
+# Load data
+scRNA_cn <- readRDS(file = "output_sc/Bakhoum_scRNA.rds")
+
+CIN.DE.bulk_noLFC <-read_csv2("data/bulk_transcriptomics_deseq_noLFC_3samples.csv")
+
+export = FALSE
+
+# generate output dir path named data
+source.output.dir <- file.path("output_sc_x_bulk")
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+} else{
+  print("Output folder already exists")
+}
+```
+
+# Helper functions
+```{r}
+GeomSplitViolin <- ggproto("GeomSplitViolin", GeomViolin, 
+                           draw_group = function(self, data, ..., draw_quantiles = NULL) {
+  data <- transform(data, xminv = x - violinwidth * (x - xmin), xmaxv = x + violinwidth * (xmax - x))
+  grp <- data[1, "group"]
+  newdata <- plyr::arrange(transform(data, x = if (grp %% 2 == 1) xminv else xmaxv), if (grp %% 2 == 1) y else -y)
+  newdata <- rbind(newdata[1, ], newdata, newdata[nrow(newdata), ], newdata[1, ])
+  newdata[c(1, nrow(newdata) - 1, nrow(newdata)), "x"] <- round(newdata[1, "x"])
+
+  if (length(draw_quantiles) > 0 & !scales::zero_range(range(data$y))) {
+    stopifnot(all(draw_quantiles >= 0), all(draw_quantiles <=
+      1))
+    quantiles <- ggplot2:::create_quantile_segment_frame(data, draw_quantiles)
+    aesthetics <- data[rep(1, nrow(quantiles)), setdiff(names(data), c("x", "y")), drop = FALSE]
+    aesthetics$alpha <- rep(1, nrow(quantiles))
+    both <- cbind(quantiles, aesthetics)
+    quantile_grob <- GeomPath$draw_panel(both, ...)
+    ggplot2:::ggname("geom_split_violin", grid::grobTree(GeomPolygon$draw_panel(newdata, ...), quantile_grob))
+  }
+  else {
+    ggplot2:::ggname("geom_split_violin", GeomPolygon$draw_panel(newdata, ...))
+  }
+})
+
+geom_split_violin <- function(mapping = NULL, data = NULL, stat = "ydensity", position = "identity", ..., 
+                              draw_quantiles = NULL, trim = TRUE, scale = "area", na.rm = FALSE, 
+                              show.legend = NA, inherit.aes = TRUE) {
+  layer(data = data, mapping = mapping, stat = stat, geom = GeomSplitViolin, 
+        position = position, show.legend = show.legend, inherit.aes = inherit.aes, 
+        params = list(trim = trim, scale = scale, draw_quantiles = draw_quantiles, na.rm = na.rm, ...))
+}
+
+save_pheatmap_png <- function(x, filename, width=3500, height=7000, res = 300) {
+  png(filename, width = width, height = height, res = res)
+  grid::grid.newpage()
+  grid::grid.draw(x$gtable)
+  dev.off()
+}
+
+# Plot gene expression of CIN high x low cells
+plot_cluster_split_violin <- function(object, id1, id2, gene_list){
+
+  # Subset data
+  id_1 <- subset(object, idents = id1)
+  id_2 <- subset(object, idents = id2)
+
+  # Get expression data of relevant genes as a data frame
+  mat <- Seurat::GetAssayData(id_1, assay = "RNA", slot = "data")
+  mat <- mat[rownames(mat) %in% gene_list, ]
+  df1 <- mat %>% t() %>% as.data.frame() %>% mutate(cluster = id1)
+
+  mat <- Seurat::GetAssayData(id_2, assay = "RNA", slot = "data")
+  mat <- mat[rownames(mat) %in% gene_list, ]
+  df2 <- mat %>% t() %>% as.data.frame() %>% mutate(cluster = id2)
+
+  # Combine data from both IDs
+  df_c <- df1 %>% rbind(df2)
+  df_c <- df_c %>% pivot_longer(cols = gene_list, names_to = "gene", values_to = "value")
+    
+  # Plot
+  plot <- df_c %>% mutate(dummy = "dummy") %>% ggplot(aes(x = dummy, y = value, fill = as.factor(cluster))) + geom_split_violin() + facet_wrap(~gene, scales = "free_x") + coord_flip() + labs(x = "", y = "Expression", fill = "Identity", title = deparse(substitute(gene_list))) +  theme(plot.title = element_text(hjust = 0.5))
+  print(plot)
+
+#   # Z score and plot
+#   df_z <- df_c %>% group_by(gene) %>% mutate(Z_scored_value =  (value-mean(value))/sd(value), dummy = "dummy")
+# # group_by(cluster, gene)
+#   zplot <- df_z %>% ggplot(aes(x = dummy, y = Z_scored_value, fill = as.factor(cluster))) + geom_split_violin() + facet_wrap(~gene, scales = "free_x") + coord_flip() + labs(x = "", y = "Z-scored expression", title = deparse(substitute(gene_list))) +  theme(plot.title = element_text(hjust = 0.5))
+#   print(zplot)
+}
+```
+
+# CIN DE
+# Import
+```{r}
+# Import objects instead of running expensive computations again
+CIN.DE <- read.csv2(paste0(source.output.dir, "/Bakhoum_scRNA_CIN_cluster_markers.csv"))
+
+CIN.DE2 <- read.csv2(paste0(source.output.dir, "/Bakhoum_scRNA_CIN_cluster_markers2.csv"))
+
+CIN.DE2.cutoff <- CIN.DE2 %>% filter(pct.1 >= 0.05)
+
+CIN.DE.glmGamPoi <- read.csv2(file = paste0(source.output.dir, "/CIN.DE.glmGamPoi.csv"))
+
+df.deseq.results.sc <- read.csv2(paste0(source.output.dir, "/df.deseq.results.sc.csv"))
+
+df.deseq.results.scGamPoi <- read.csv2(paste0(source.output.dir,"/df.deseq.results.scGamPoi.csv"))
+
+df.deseq.results.scWald <- read.csv2(paste0(source.output.dir,"/df.deseq.results.scWald.csv"))
+
+```
+
+```{r}
+# Get means of sc expression per gene
+mat <- Seurat::GetAssayData(scRNA_cn, assay = "RNA", slot = "data")
+
+sc_means <- mat %>% rowMeans() %>% as.data.frame() %>% rename("sc_mean" = ".") %>% rownames_to_column("symbol")
+
+sc_mean_counts <- Seurat::GetAssayData(scRNA_cn, assay = "RNA", slot = "counts") %>% rowMeans() %>% as.data.frame() %>% rename("sc_mean_count" = ".") %>% rownames_to_column("symbol")
+
+sc_means <- sc_means %>% left_join(sc_mean_counts)
+
+# Plot gene expression of CIN high x low cells
+Idents(scRNA_cn) <- "CIN_status"
+
+# Subset data
+CIN_high <- subset(scRNA_cn, idents = "CIN-high")
+CIN_low <- subset(scRNA_cn, idents = "CIN-low")
+
+# Calculate average gene expression for CIN high and low cells
+avg.CINhigh.cells_counts <- as.data.frame(AverageExpression(CIN_high, slot = "counts")) %>% rename("CIN_high" = all) %>% rownames_to_column("gene")
+
+avg.CINlow.cells_counts <- as.data.frame(AverageExpression(CIN_low, slot = "counts")) %>% rename("CIN_low" = all) %>% rownames_to_column("gene")
+
+mat_counts <- Seurat::GetAssayData(scRNA_cn, assay = "RNA", slot = "counts")
+
+sc_means_counts <- mat_counts %>% rowMeans() %>% as.data.frame() %>% rename("sc_mean" = ".") %>% rownames_to_column("symbol")
+
+avg.CINhigh.cells_counts %>% full_join(avg.CINlow.cells_counts, by = "gene") %>% ggplot(aes(x = CIN_low, y = CIN_high)) + geom_point() + scale_y_continuous(trans = "log1p") + scale_x_continuous(trans = "log1p")
+
+# Calculate average gene expression for CIN high and low cells
+avg.CINhigh.cells <- as.data.frame(AverageExpression(CIN_high, slot = "data")) %>% rename("CIN_high" = all) %>% rownames_to_column("gene")
+
+avg.CINlow.cells <- as.data.frame(AverageExpression(CIN_low, slot = "data")) %>% rename("CIN_low" = all) %>% rownames_to_column("gene")
+
+
+# Plot CIN high x cin low pseudocounts in log space
+avg.CINhigh.cells %>% full_join(avg.CINlow.cells, by = "gene") %>% ggplot(aes(x = CIN_low, y = CIN_high)) + geom_point() + scale_y_continuous(trans = "log1p") + scale_x_continuous(trans = "log1p")
+
+```
+
+# Seurat Find markers
+```{r}
+# Find CIN-high markers based on DE 
+Idents(scRNA_cn) <- "CIN_status"
+
+table(scRNA_cn$orig.ident, scRNA_cn$CIN_status)
+
+# CIN.DE <- FindMarkers(scRNA_cn, ident.1 = "CIN-high", min.pct = 0.05, logfc.threshold = 0, pseudocount.use = 1) %>% rownames_to_column("gene")
+
+# CIN.DE2 <- FindMarkers(scRNA_cn, ident.1 = "CIN-high", min.pct = 0, logfc.threshold = 0, pseudocount.use = 0.001) %>% rownames_to_column("gene")
+
+if (export){
+CIN.DE %>% write.csv2(file = paste0(source.output.dir, "/Bakhoum_scRNA_CIN_cluster_markers.csv"), row.names = FALSE)
+
+CIN.DE2 %>% write.csv2(file = paste0(source.output.dir, "/Bakhoum_scRNA_CIN_cluster_markers2.csv"), row.names = FALSE)
+}
+
+```
+
+# Gamma Poisson GLM
+```{r}
+# DE using a gamma poisson GLM
+
+# counts <- Seurat::GetAssayData(scRNA_cn, assay = "RNA", slot = "counts")
+# counts %>% dim()
+
+# counts <- counts[which(rowSums(counts) > 0),]
+# counts %>% dim()
+
+# CIN_status <- scRNA_regcycle@meta.data %>% select(CIN_status)
+# CIN_status$CIN_status <- gsub("-", "_", CIN_status$CIN_status)
+
+# fit <- glm_gp(as.matrix(counts), design = CIN_status$CIN_status)
+# saveRDS(fit, "CIN_glmGamPoi_fit.rds")
+# 
+# fit <- readRDS(file = "data/CIN_glmGamPoi_fit.rds")
+# summary(fit)
+# 
+# CIN.DE.glmGamPoi <- test_de(fit, contrast = `CIN_high` - `CIN_low`)
+# 
+# CIN.DE.glmGamPoi <- CIN.DE.glmGamPoi %>% rename("gene" = name)
+
+if(export){
+  CIN.DE.glmGamPoi %>% write.csv2(file = paste0(source.output.dir, "/CIN.DE.glmGamPoi.csv"), row.names = FALSE)
+}
+
+# Comparing GLM DE and Seurat DE
+CIN.DE.glmGamPoi %>% mutate(lfc = ifelse(abs(lfc) < 1e8, lfc, Inf* sign(lfc))) %>% inner_join(CIN.DE2) %>% ggplot(aes(x = lfc, y = avg_log2FC)) + geom_point() + geom_abline(slope = 1)
+```
+
+# DESeq2
+```{r}
+# design_c <- scRNA_cn@meta.data %>% select(CIN_status) %>% rownames_to_column("Sample")
+
+# sc_counts <- Seurat::GetAssayData(scRNA_cn, assay = "RNA", slot = "counts")
+
+# sc_counts <- as.matrix(sc_counts)
+# head(sc_counts[, 1:2])
+
+```
+
+```{r}
+# convert Sample and group columns to factors.
+# Rows must be in the same order as the columns of the count matrix
+# df.diff.design <- design_c %>%
+#   mutate(
+#     Sample = as.factor(Sample),
+#     CIN_status = as.factor(CIN_status)
+#   ) 
+
+# head(df.diff.design)
+```
+
+Create the DESeq2 object and estimate size factors to apply counts normalization
+
+```{r}
+# create the deseq dataset
+# deseq.dataset <- DESeqDataSetFromMatrix(
+#   countData=as.matrix(sc_counts),
+#   colData=df.diff.design,
+#   design=~CIN_status
+# ) %>%
+#   estimateSizeFactors()
+
+# Change factor levels to compare CIN-High x CIN-low (default is alphabetical)
+# deseq.dataset$CIN_status <- factor(deseq.dataset$CIN_status, levels = c("CIN-low","CIN-high"))
+
+```
+
+## Dispersion estimation
+```{r}
+# create DESeq object
+# dds <- DESeq(deseq.dataset, reduced = ~ 1, test = "LRT", useT = TRUE, minmu = 1e-6, minReplicatesForReplace=Inf)
+
+# ddsWald <- DESeq(deseq.dataset, test = "Wald", useT = TRUE, minmu = 1e-6, minReplicatesForReplace=Inf)
+
+# ddsGamPoi <- DESeq(deseq.dataset, reduced = ~ 1, fitType = "glmGamPoi", test = "LRT", useT = TRUE, minmu = 1e-6, minReplicatesForReplace=Inf)
+```
+
+```{r}
+# resultsNames(dds)
+# res <- results(dds)
+# resGamPoi <- results(ddsGamPoi)
+# resWald <- results(ddsWald)
+# summary(resWald)
+
+# df.deseq.results.sc <- res %>%
+#   as.data.frame() %>%
+#   rownames_to_column("gene")
+
+# df.deseq.results.scGamPoi <- resGamPoi %>%
+#   as.data.frame() %>%
+#   rownames_to_column("gene")
+
+# df.deseq.results.scWald <- resWald %>%
+#   as.data.frame() %>%
+#   rownames_to_column("gene")
+
+# Export
+# df.deseq.results.sc %>% write.csv2("df.deseq.results.sc.csv", row.names = FALSE)
+# df.deseq.results.scGamPoi %>% write.csv2("df.deseq.results.scGamPoi.csv", row.names = FALSE)
+# df.deseq.results.scWald %>% write.csv2("df.deseq.results.scWald.csv", row.names = FALSE)
+```
+
+```{r}
+# Check how many genes have an adj p-value < 0.01
+df.deseq.results.sc %>% filter(padj < 0.01) %>% select(gene) %>% n_distinct()
+df.deseq.results.scGamPoi %>% filter(padj < 0.01) %>% select(gene) %>% n_distinct()
+
+summary(df.deseq.results.sc)
+summary(df.deseq.results.scWald)
+summary(df.deseq.results.scGamPoi)
+
+```
+
+```{r}
+CIN.top <- CIN.DE %>% top_n(n = 25, wt = avg_log2FC)
+
+DoHeatmap(scRNA_cn, features = CIN.top$gene)
+```
+
+```{r}
+# Calculating scRNA log2fc with pseudocounts manually
+sc_means_df <- avg.CINhigh.cells %>% full_join(avg.CINlow.cells, by = "gene") %>% mutate(raw_fc = CIN_high/CIN_low, log2raw_fc = log2(raw_fc), fc = (CIN_high + 1)/(CIN_low + 1), log2fc = log2(fc), spfc = (CIN_high+0.001)/(CIN_low+0.001), log2spfc = log2(spfc)) 
+
+sc_means_df_counts <- avg.CINhigh.cells_counts %>% full_join(avg.CINlow.cells_counts, by = "gene") %>% mutate(raw_fc = CIN_high/CIN_low, log2raw_fc = log2(raw_fc), fc = (CIN_high + 1)/(CIN_low + 1), log2fc = log2(fc), spfc = (CIN_high+0.001)/(CIN_low+0.001), log2spfc = log2(spfc)) 
+
+CIN.DE %>% filter(gene %in% c("LAPTM5", "MARCKSL1", "HLA-B"))
+sc_means_df %>% filter(gene %in% c("LAPTM5", "MARCKSL1", "HLA-B"))
+sc_means_df_counts %>% filter(gene %in% c("LAPTM5", "MARCKSL1", "HLA-B"))
+
+as.data.frame(AverageExpression(scRNA_cn, slot = "data")) %>% summary()
+as.data.frame(AverageExpression(scRNA_cn, slot = "counts")) %>% summary()
+
+```
+
+```{r}
+# Plot gene expression of CIN high x low cells, labeling DE genes
+DE_comp <- avg.CINhigh.cells %>% full_join(avg.CINlow.cells, by = "gene") %>% left_join(
+  CIN.DE %>% mutate(CIN_DE = TRUE, label = p_val_adj < 1e-260)  %>% select(gene, CIN_DE, label)
+)
+
+DE_comp %>% ggplot(aes(x = CIN_low, y = CIN_high, col = label)) + geom_point() +
+  geom_text_repel(
+  aes(x = CIN_low, y = CIN_high, label = gene), data = DE_comp %>% filter(label), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+  ) + theme(legend.position = "none") + scale_y_continuous(trans = "log1p") + scale_x_continuous(trans = "log1p")
+
+rm(avg.CINhigh.cells, avg.CINlow.cells, CIN_high, CIN_low, DE_comp)
+```
+
+# Compare with bulk CIN signature
+```{r}
+CIN_signature <- c('PELI2','BMP2','SHH','TNS4','RAB3B','ROBO1','ARHGAP28','CHN2','CST1','F13A1','CPVL','SEMA6D','NHSL2','GTF2IP7','DPYSL3','PCDH7','KHDRBS3','TRAC','TMEM156', 'CST4','CD24','FGF5','NTN4')
+
+# Compare with Bakhoum CIN gene signature
+CIN_signature_df <- CIN_signature %>% as.data.frame() %>% rename('gene' = ".") %>% mutate(Bakhoum_gene_sig = TRUE)
+
+CIN.DE %>% left_join(CIN_signature_df) %>% filter(Bakhoum_gene_sig)
+
+CIN.DE2 %>% left_join(CIN_signature_df) %>% filter(Bakhoum_gene_sig)
+
+CIN.DE2 %>% arrange(-avg_log2FC) %>% head(25) %>% left_join(CIN_signature_df) %>% filter(Bakhoum_gene_sig)
+
+CIN.DE.glmGamPoi %>% select(-c(df1, df2)) %>% left_join(CIN_signature_df) %>% filter(Bakhoum_gene_sig)
+
+```
+
+# Volcano Plots
+```{r}
+alpha = 1e-15
+log2FCthresh = 3
+
+CIN.DE <- CIN.DE %>% mutate(
+  within_threshold = (p_val < alpha & abs(avg_log2FC) > log2FCthresh)
+)
+
+CIN.DE2 <- CIN.DE2 %>% mutate(
+  within_threshold = (p_val < alpha & abs(avg_log2FC) > log2FCthresh)
+)
+
+CIN.DE2.cutoff <- CIN.DE2.cutoff %>% mutate(
+  within_threshold = (p_val < alpha & abs(avg_log2FC) > log2FCthresh)
+)
+
+CIN.DE.glmGamPoi <- CIN.DE.glmGamPoi %>% mutate(
+  within_threshold = (pval < alpha & abs(lfc) > log2FCthresh)
+)
+
+#df.volcano <- df.deseq.results %>% mutate(threshold = (abs(log2FoldChange) > 2 & padj < alpha))
+
+CIN.DE %>% ggplot(
+  aes(x=avg_log2FC , y= -log10(p_val + 1e-300), col = within_threshold)) +     geom_point(alpha = 0.5) +
+geom_vline(xintercept = 0, col = "black") + 
+geom_vline(xintercept = c(-log2FCthresh, log2FCthresh), col = "red") +   geom_hline(yintercept = -log10(alpha), colour = "red") + 
+geom_text_repel(
+  aes(x = avg_log2FC, y = -log10(p_val + 1e-300), label = gene), data = CIN.DE %>% filter(within_threshold), colour = "grey20", min.segment.length = 0
+  ) +
+  theme(legend.position = "none", plot.title = element_text(hjust= 0.5)) +
+  labs(
+    title = "Volcano plot Findmarkers 1 Pseudocount", 
+    x = "Effect size: log2(fold-change)", 
+    y = "-log10(p-value)"
+  )
+
+CIN.DE2 %>% ggplot(
+  aes(x=avg_log2FC , y= -log10(p_val + 1e-300), col = within_threshold)) +     geom_point(alpha = 0.5) +
+geom_vline(xintercept = 0, col = "black") + 
+geom_vline(xintercept = c(-log2FCthresh, log2FCthresh), col = "red") +   geom_hline(yintercept = -log10(alpha), colour = "red") + 
+geom_text_repel(
+  aes(x = avg_log2FC, y = -log10(p_val + 1e-300), label = gene), data = CIN.DE2 %>% filter(gene %in% CIN_signature), colour = "grey20", min.segment.length = 0 , max.overlaps = 20
+  ) +
+  theme(legend.position = "none", plot.title = element_text(hjust= 0.5)) +
+  labs(
+    title = "Volcano plot Findmarkers 0.001 Pseudocount", 
+    x = "Effect size: log2(fold-change)", 
+    y = "-log10(p-value)"
+  )
+
+
+if(export){
+  #png(filename=paste0(source.output.dir,"/GSEA_x_orig.png"), width=600, height=600)
+  ggsave(file=paste0(source.output.dir,"/pseudo0.001_volcano.png"), width=6, height=4, dpi=300)
+}
+
+CIN.DE2.cutoff %>% ggplot(
+  aes(x=avg_log2FC , y= -log10(p_val + 1e-300), col = within_threshold)) +     geom_point(alpha = 0.5) +
+geom_vline(xintercept = 0, col = "black") + 
+geom_vline(xintercept = c(-log2FCthresh, log2FCthresh), col = "red") +   geom_hline(yintercept = -log10(alpha), colour = "red") + 
+geom_text_repel(
+  aes(x = avg_log2FC, y = -log10(p_val + 1e-300), label = gene), data = CIN.DE2.cutoff %>% filter(gene %in% CIN_signature), colour = "grey20", min.segment.length = 0
+  ) +
+  theme(legend.position = "none", plot.title = element_text(hjust= 0.5)) +
+  labs(
+    title = "Volcano plot Findmarkers 0.001 Pseudocount >5% exp", 
+    x = "Effect size: log2(fold-change)", 
+    y = "-log10(p-value)"
+  )
+
+
+if(export){
+  #png(filename=paste0(source.output.dir,"/GSEA_x_orig.png"), width=600, height=600)
+  ggsave(file=paste0(source.output.dir,"/pseudo0.001_volcano_cutoff5.png"), width=6, height=4, dpi=300)
+}
+
+CIN.DE.glmGamPoi %>% mutate(lfc = ifelse(abs(lfc) < 1e8, lfc, Inf* sign(lfc))) %>% ggplot(
+  aes(x=lfc , y= -log10(pval + 1e-300), col = within_threshold)) +     geom_point(alpha = 0.5) +
+geom_vline(xintercept = 0, col = "black") + 
+geom_vline(xintercept = c(-log2FCthresh, log2FCthresh), col = "red") +   geom_hline(yintercept = -log10(alpha), colour = "red") + 
+geom_text_repel(
+  aes(x = lfc, y = -log10(pval + 1e-300), label = gene), data = CIN.DE.glmGamPoi %>% mutate(lfc = ifelse(abs(lfc) < 1e8, lfc, Inf* sign(lfc))) %>% filter(within_threshold), colour = "grey20", min.segment.length = 0
+  ) +
+  theme(legend.position = "none", plot.title = element_text(hjust= 0.5)) +
+  labs(
+    title = "Volcano plot gampoi", 
+    x = "Effect size: log2(fold-change)", 
+    y = "-log10(p-value)"
+  )
+
+if(export){
+  #png(filename=paste0(source.output.dir,"/GSEA_x_orig.png"), width=600, height=600)
+  ggsave(file=paste0(source.output.dir,"/gamPoi_volcano.png"), width=6, height=4, dpi=300)
+}
+```
+
+```{r}
+df.deseq.results.sc <- df.deseq.results.sc %>% mutate(
+  within_threshold = (padj < alpha & abs(log2FoldChange) > log2FCthresh)
+)
+
+df.deseq.results.scGamPoi <- df.deseq.results.scGamPoi %>% mutate(
+  within_threshold = (padj < alpha & abs(log2FoldChange) > log2FCthresh)
+)
+
+df.deseq.results.scWald <- df.deseq.results.scWald %>% mutate(
+  within_threshold = (padj < alpha & abs(log2FoldChange) > log2FCthresh)
+)
+
+df.deseq.results.sc %>% ggplot(
+  aes(x=log2FoldChange , y= -log10(padj + 1e-300), col = within_threshold)) + 
+  geom_point(alpha = 0.5) +
+geom_vline(xintercept = 0, col = "black") + 
+geom_vline(xintercept = c(-log2FCthresh, log2FCthresh), col = "red") +   geom_hline(yintercept = -log10(alpha), colour = "red") + 
+geom_text_repel(
+  aes(x = log2FoldChange, y = -log10(padj + 1e-300), label = gene), data = df.deseq.results.sc %>% filter(within_threshold), colour = "grey20", min.segment.length = 0
+  ) +
+  theme(legend.position = "none", plot.title = element_text(hjust= 0.5)) +
+  labs(
+    title = "Volcano plot Deseq2 LRT", 
+    x = "Effect size: log2(fold-change)", 
+    y = "-log10(adjusted p-value)"
+  )
+# + scale_x_continuous(breaks = seq(-6,9, by = 1))
+
+if(export){
+  #png(filename=paste0(source.output.dir,"/GSEA_x_orig.png"), width=600, height=600)
+  ggsave(file=paste0(source.output.dir,"/deseq2_volcano.png"), width=6, height=4, dpi=300)
+}
+
+df.deseq.results.scWald %>% ggplot(
+  aes(x=log2FoldChange , y= -log10(padj + 1e-300), col = within_threshold)) + 
+  geom_point(alpha = 0.5) +
+geom_vline(xintercept = 0, col = "black") + 
+geom_vline(xintercept = c(-log2FCthresh, log2FCthresh), col = "red") +   geom_hline(yintercept = -log10(alpha), colour = "red") + 
+geom_text_repel(
+  aes(x = log2FoldChange, y = -log10(padj + 1e-300), label = gene), data = df.deseq.results.scWald %>% filter(within_threshold), colour = "grey20", min.segment.length = 0
+  ) +
+  theme(legend.position = "none", plot.title = element_text(hjust= 0.5)) +
+  labs(
+    title = "Volcano plot Deseq2 Wald", 
+    x = "Effect size: log2(fold-change)", 
+    y = "-log10(adjusted p-value)"
+  )
+if(export){
+  ggsave(file=paste0(source.output.dir,"/deseq2Wald_volcano.png"), width=6, height=4, dpi=300)
+}
+
+# Apparently the same results as GamPoi
+CIN.DE.glmGamPoi %>% select(gene, lfc) %>% left_join(df.deseq.results.scGamPoi) %>% filter(abs(lfc) < 1e8) %>%  ggplot(aes(x = lfc, y = log2FoldChange)) + geom_point()
+
+
+df.deseq.results.scGamPoi.cuttoff <- df.deseq.results.scGamPoi %>% mutate(log2FoldChange = ifelse(abs(log2FoldChange) < 1e8, log2FoldChange, Inf* sign(log2FoldChange)))
+  
+  
+df.deseq.results.scGamPoi.cuttoff   %>% ggplot(
+  aes(x=log2FoldChange , y= -log10(padj + 1e-300), col = within_threshold)) + 
+  geom_point(alpha = 0.5) +
+geom_vline(xintercept = 0, col = "black") + 
+geom_vline(xintercept = c(-log2FCthresh, log2FCthresh), col = "red") +   geom_hline(yintercept = -log10(alpha), colour = "red") + 
+geom_text_repel(
+  aes(x = log2FoldChange, y = -log10(padj + 1e-300), label = gene), data = df.deseq.results.scGamPoi.cuttoff %>% filter(within_threshold), colour = "grey20", min.segment.length = 0
+  ) +
+  theme(legend.position = "none", plot.title = element_text(hjust= 0.5)) +
+  labs(
+    title = "Volcano plot Deseq2 Gampoi", 
+    x = "Effect size: log2(fold-change)", 
+    y = "-log10(adjusted p-value)"
+  )
+
+if(export){
+  #png(filename=paste0(source.output.dir,"/GSEA_x_orig.png"), width=600, height=600)
+  ggsave(file=paste0(source.output.dir,"/deseq2_gampoi_volcano.png"), width=6, height=4, dpi=300)
+}
+
+```
+
+# Plotting signatures
+## EMT 
+```{r}
+Idents(scRNA_cn) <- "CIN_status"
+
+# Plotting EMT signature 
+EMT_signature <- c("EZH", "JUN", "VIM", "STEAP1", "SOX4", "MMP14", "SHH", "TIMP1", "ZEB1", "ZEB2", "SNAI2")
+# FeaturePlot(scRNA_regcycle, features = EMT_signature)
+
+EMT_signature <- EMT_signature[EMT_signature %in% rownames(scRNA_cn@assays$RNA)]
+
+for(i in 1:length(EMT_signature)){
+p <- VlnPlot(scRNA_cn, features = EMT_signature[i])
+print(p)
+}
+
+```
+## M signature 
+```{r}
+# Plotting Genes enriched in the "M" Population from Bakhoum et al
+M_markers <- c("ITGB5", "ITGB1", "ITGA5", "ITGA10", "IGFBP4", "FN1", "DSC2", "CXCL1","CTNNB1", "BMP4", "BCL2L1", "VIM", "TIMP1", "TGFBR2", "TGFBI", "TGFB1", "PPARG", "NUPR1", "MSN", "LMCD1", "LEF1", "JAG1")
+
+M_markers <- M_markers[M_markers %in% rownames(scRNA_cn@assays$RNA)]
+
+Idents(scRNA_cn) <- "CIN_status"
+for(i in 1:length(M_markers)){
+p <- VlnPlot(scRNA_cn, features = M_markers[i])
+print(p)
+}
+```
+## CIN signature 
+```{r}
+# Plot CIN signature from Bakhoum et al 2018 (Supp. table 5), comparing CIN high and CIN low
+CIN_signature <- c('PELI2','BMP2','SHH','TNS4','RAB3B','ROBO1','ARHGAP28','CHN2','CST1','F13A1','CPVL','SEMA6D','NHSL2','GTF2IP7','DPYSL3','PCDH7','KHDRBS3','TRAC','TMEM156', 'CST4','CD24','FGF5','NTN4')
+
+CIN_signature <- CIN_signature[CIN_signature %in% rownames(scRNA_cn@assays$RNA)]
+
+Idents(scRNA_cn) <- "CIN_status"
+for(i in 1:length(CIN_signature)){
+p <- VlnPlot(scRNA_cn, features = CIN_signature[i])
+print(p)
+}
+
+```
+
+## Split violins
+```{r}
+Idents(scRNA_cn) <- "CIN_status"
+plot_cluster_split_violin(object = scRNA_cn, id1 = "CIN-high", id2 = "CIN-low", gene_list = EMT_signature)
+
+if(export){
+ggsave(file = paste0(source.output.dir, "/scRNA_EMTviolin.png"), width=6, height=4, dpi=300)
+}
+
+plot_cluster_split_violin(object = scRNA_cn, id1 = "CIN-high", id2 = "CIN-low", gene_list = M_markers)
+
+if(export){
+ggsave(file = paste0(source.output.dir, "/scRNA_Mviolin.png"), width=8, height=6, dpi=300)
+}
+
+plot_cluster_split_violin(object = scRNA_cn, id1 = "CIN-high", id2 = "CIN-low", gene_list = CIN_signature)
+
+if(export){
+ggsave(file = paste0(source.output.dir, "/scRNA_CINviolin.png"), width=8, height=6, dpi=300)
+}
+```
+
+# Compare with not shrunk LFC - gene correlation
+```{r}
+CIN.DE.c_noLFC <- CIN.DE.bulk_noLFC %>% inner_join(CIN.DE2 %>% rename("symbol" = gene)) %>% mutate(bulk_sign = sign(log2FoldChange), sc_sign = sign(avg_log2FC)) %>% left_join(sc_means)
+
+CIN.DE.c_noLFC %>% ggplot(aes(x = log2FoldChange, y = avg_log2FC, size = sc_mean, col = -log10(p_val))) + geom_point(alpha = 0.75) + geom_abline(slope = 1, col = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low", x = "Bulk transcriptomics log2fc", y = "scRNA-seq transcriptomics log2fc") + geom_text_repel(
+  aes(x = log2FoldChange, y = avg_log2FC, size = 1, label = symbol), data = CIN.DE.c_noLFC %>% filter(symbol %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 50)
+
+
+if(export){
+  ggsave(file=paste0(source.output.dir,"/pseudo0.001_sc_x_bulk_noLFC.png"), width=6, height=4, dpi=300)
+}
+
+cor(CIN.DE.c_noLFC$log2FoldChange, CIN.DE.c_noLFC$avg_log2FC)
+```
+
+```{r}
+# Filtering out low % genes
+CIN.DE.c_noLFC_cutoff <- CIN.DE.bulk_noLFC %>% inner_join(CIN.DE2.cutoff %>% rename("symbol" = gene)) %>% mutate(bulk_sign = sign(log2FoldChange), sc_sign = sign(avg_log2FC)) %>% left_join(sc_means)
+
+CIN.DE.c_noLFC_cutoff %>% ggplot(aes(x = log2FoldChange, y = avg_log2FC, size = sc_mean, col = -log10(p_val))) + geom_point(alpha = 0.8) + geom_abline(slope = 1, col = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low", x = "Bulk transcriptomics log2fc", y = "scRNA-seq transcriptomics log2fc") + geom_text_repel(
+  aes(x = log2FoldChange, y = avg_log2FC, size = 1, label = symbol), data = CIN.DE.c_noLFC_cutoff %>% filter(symbol %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 50)
+
+sum(CIN_signature %in% CIN.DE2$gene)
+sum(CIN_signature %in% CIN.DE2.cutoff$gene)
+
+if(export){
+  #png(filename=paste0(source.output.dir,"/GSEA_x_orig.png"), width=600, height=600)
+  ggsave(file=paste0(source.output.dir,"/pseudo0.001_sc_x_bulk_noLFC_cutoff5.png"), width=6, height=4, dpi=300)
+}
+
+cor(CIN.DE.c_noLFC_cutoff$log2FoldChange, CIN.DE.c_noLFC_cutoff$avg_log2FC)
+```
+
+# Compare with Bulk stat, instead of shrunk LFC - gene correlation
+```{r}
+CIN.DE.c_noLFC %>% ggplot(aes(x = stat, y = avg_log2FC, size = sc_mean, col = -log10(p_val))) + geom_point(alpha = 0.8) + geom_abline(slope = 1, col = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low", x = "Bulk transcriptomics Wald Stat", y = "scRNA-seq transcriptomics log2fc") + geom_text_repel(
+  aes(x = stat, y = avg_log2FC, size = 1, label = symbol), data = CIN.DE.c_noLFC %>% filter(gene %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 50)
+
+
+if(export){
+  ggsave(file=paste0(source.output.dir,"/pseudo0.001_sc_x_bulk_stat.png"), width=6, height=4, dpi=300)
+}
+
+cor(CIN.DE.c_noLFC$stat, CIN.DE.c_noLFC$avg_log2FC)
+```
+
+```{r}
+# Comparing stat
+# Filtering out low % genes
+CIN.DE.c_noLFC_cutoff %>% ggplot(aes(x = stat, y = avg_log2FC, size = sc_mean, col = -log10(p_val))) + geom_point(alpha = 0.8) + geom_abline(slope = 1, col = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low", x = "Bulk transcriptomics Wald Stat", y = "scRNA-seq transcriptomics log2fc") + geom_text_repel(
+  aes(x = stat, y = avg_log2FC, size = 1, label = symbol), data = CIN.DE.c_noLFC_cutoff %>% filter(gene %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 50)
+
+
+if(export){
+  #png(filename=paste0(source.output.dir,"/GSEA_x_orig.png"), width=600, height=600)
+  ggsave(file=paste0(source.output.dir,"/pseudo0.001_sc_x_bulk_stat_cutoff5.png"), width=6, height=4, dpi=300)
+}
+
+cor(CIN.DE.c_noLFC_cutoff$stat, CIN.DE.c_noLFC_cutoff$avg_log2FC)
+```
+
+# Compare with Gamma Poison - not shrunk
+```{r}
+# Gamma poisson GLM DE x bulk 
+CIN.DE.c.gampoi_noLFC <- CIN.DE.bulk_noLFC %>% inner_join(CIN.DE.glmGamPoi %>% rename("symbol" = gene), by = "symbol") %>% left_join(sc_means)
+
+CIN.DE.c.gampoi_noLFC_cutoff <- CIN.DE.c.gampoi_noLFC %>% mutate(lfc = ifelse(abs(lfc) < 1e6, lfc, Inf* sign(lfc)))
+
+CIN.DE.c.gampoi_noLFC_cutoff %>% ggplot(aes(x = stat, y = lfc, col = sc_mean)) + geom_point(alpha = 0.8) + 
+  geom_abline(slope = 1, col = "blue", alpha = 0.5) + 
+  geom_hline(yintercept = 0, alpha = 0.5) + 
+  geom_vline(xintercept = 0, alpha = 0.5) + 
+  labs(title = "CIN-High x CIN-Low", x = "Bulk Wald Stat", y = "scRNA-seq Log2FC") + 
+  geom_text_repel(
+  aes(x = stat, y = lfc, label = symbol), data = CIN.DE.c.gampoi_noLFC_cutoff %>% filter(symbol %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 10
+  ) + theme(plot.title = element_text(hjust = 0.5))  + scale_color_gradient2(low ="gray",mid ="gray", high="blue")
+
+if(export){
+  ggsave(file=paste0(source.output.dir,"/gampoi_sc_x_bulk_stat.png"), width=6, height=4, dpi=300)
+}
+
+cor(CIN.DE.c.gampoi_noLFC$log2FoldChange, CIN.DE.c.gampoi_noLFC$lfc)
+cor((CIN.DE.c.gampoi_noLFC %>% filter(abs(lfc) < 1e6))$log2FoldChange, (CIN.DE.c.gampoi_noLFC%>% filter(abs(lfc) < 1e6))$lfc)
+
+# Check agreement between the sign of genes
+table(sign(CIN.DE.c.gampoi_noLFC$log2FoldChange), sign(CIN.DE.c.gampoi_noLFC$lfc))
+
+round(prop.table(table(sign(CIN.DE.c.gampoi_noLFC$log2FoldChange), sign(CIN.DE.c.gampoi_noLFC$lfc))), 3)
+```
+
+# Compare with DESeq2 LRT
+```{r}
+# DESEq2 LRT x bulk 
+CIN.DE.c.deseq <- CIN.DE.bulk_noLFC %>% inner_join(df.deseq.results.sc %>% rename("symbol" = gene),  suffix = c(".bulk", ".sc"), by = "symbol") %>% left_join(sc_means)
+
+CIN.DE.c.deseq %>% ggplot(aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = sc_mean, col = -log10(pvalue.sc))) + geom_point() + 
+  geom_abline(slope = 1, col = "blue", alpha = 0.5) + 
+  geom_hline(yintercept = 0, alpha = 0.5) + 
+  geom_vline(xintercept = 0, alpha = 0.5) + 
+  labs(title = "CIN-High x CIN-Low", x = "Bulk Log2FC", y = "scRNA-seq Log2FC") + 
+  geom_text_repel(
+  aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, label = symbol, size = 1), data = CIN.DE.c.deseq %>% filter(symbol %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 10
+  ) + theme(plot.title = element_text(hjust = 0.5))  + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 50)
+
+# , size = "log norm mean counts"
+if(export){
+  ggsave(file=paste0(source.output.dir,"/scdeseq_x_bulk.png"), width=6, height=4, dpi=300)
+}
+
+CIN.DE.c.deseq.f <- CIN.DE.c.deseq %>% filter(!is.na(log2FoldChange.bulk)) %>% filter(!is.na(log2FoldChange.sc))
+cor(CIN.DE.c.deseq.f$log2FoldChange.bulk, CIN.DE.c.deseq.f$log2FoldChange.sc)
+```
+# Compare with DESeq2 Wald
+```{r}
+# Deseq2 Wald x bulk 
+CIN.DE.c.deseqWald <- CIN.DE.bulk_noLFC %>% inner_join(df.deseq.results.scWald %>% rename("symbol" = gene), by = "symbol", suffix = c(".bulk", ".sc")) %>% left_join(sc_means)
+
+CIN.DE.c.deseqWald %>% ggplot(aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = sc_mean, col = abs(stat.sc))) + geom_point(alpha = 0.8) + 
+  geom_abline(slope = 1, col = "blue", alpha = 0.5) + 
+  geom_hline(yintercept = 0, alpha = 0.5) + 
+  geom_vline(xintercept = 0, alpha = 0.5) + 
+  labs(title = "CIN-High x CIN-Low", x = "Bulk Log2FC", y = "scRNA-seq Log2FC") + 
+  geom_text_repel(
+  aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, label = symbol, size = 1), data = CIN.DE.c.deseqWald %>% filter(symbol %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) +  scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 10)
+
+if(export){
+  ggsave(file=paste0(source.output.dir,"/scdeseqWald_x_bulk_log2fc.png"), width=6, height=4, dpi=300)
+}
+```
+
+```{r}
+CIN.DE.c.deseqWald %>% ggplot(aes(x = stat.bulk, y = stat.sc, size = sc_mean, col = abs(log2FoldChange.sc))) + geom_point() + 
+  geom_abline(slope = 1, col = "blue", alpha = 0.75) + 
+  geom_hline(yintercept = 0, alpha = 0.5) + 
+  geom_vline(xintercept = 0, alpha = 0.5) + 
+  labs(title = "CIN-High x CIN-Low", x = "Bulk Wald Stat", y = "scRNA-seq Wald Stat", size = "log norm mean counts", col = "abs(scLog2FC)") + 
+  geom_text_repel(
+  aes(x = stat.bulk, y = stat.sc, size = 1, label = symbol), data = CIN.DE.c.deseqWald %>% filter(symbol %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 2)
+
+if(export){
+  ggsave(file=paste0(source.output.dir,"/scdeseqWald_x_bulk_size.png"), width=6, height=4, dpi=300)
+}
+
+CIN.DE.c.deseq.f <- CIN.DE.c.deseqWald %>% filter(!is.na(stat.bulk)) %>% filter(!is.na(stat.sc))
+
+cor(CIN.DE.c.deseq.f$stat.bulk, CIN.DE.c.deseq.f$stat.sc)
+
+# Check agreement between the sign of genes
+table(sign(CIN.DE.c.deseq.f$stat.bulk), sign(CIN.DE.c.deseq.f$stat.sc))
+
+round(prop.table(table(sign(CIN.DE.c.deseq.f$stat.bulk), sign(CIN.DE.c.deseq.f$stat.sc))), 3)
+```
+
+```{r}
+# Same plot inverting color and size legends
+CIN.DE.c.deseqWald %>% ggplot(aes(x = stat.bulk, y = stat.sc, col = sc_mean, size = abs(log2FoldChange.sc))) + geom_point() + 
+  geom_abline(slope = 1, col = "blue", alpha = 0.85) + 
+  geom_hline(yintercept = 0, alpha = 0.5) + 
+  geom_vline(xintercept = 0, alpha = 0.5) + 
+  labs(title = "CIN-High x CIN-Low", x = "Bulk Wald Stat", y = "scRNA-seq Wald Stat", col = "log norm mean counts", size = "abs(scLog2FC)") + 
+  geom_text_repel(
+  aes(x = stat.bulk, y = stat.sc, label = symbol, size = 2), data = CIN.DE.c.deseqWald %>% filter(symbol %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) + scale_color_gradient2(low="gray", mid = "gray", high="blue", midpoint = 2)
+
+```
+# Compare with filtered DESeq2 Wald
+```{r}
+# cutoff filtering genes below 5% expression
+# Deseq2 Wald x bulk 
+CIN.DE.c.deseqWald.cutoff <- CIN.DE.bulk_noLFC %>% inner_join(df.deseq.results.scWald %>% rename("symbol" = gene), by = "symbol", suffix = c(".bulk", ".sc")) %>% left_join(sc_means) %>% filter(gene %in% CIN.DE2.cutoff$gene)
+
+CIN.DE.c.deseqWald.cutoff %>% ggplot(aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = sc_mean, col = abs(stat.sc))) + geom_point(alpha = 0.8) + 
+  geom_abline(slope = 1, col = "blue", alpha = 0.5) + 
+  geom_hline(yintercept = 0, alpha = 0.5) + 
+  geom_vline(xintercept = 0, alpha = 0.5) + 
+  labs(title = "CIN-High x CIN-Low", x = "Bulk Log2FC", y = "scRNA-seq Log2FC") + 
+  geom_text_repel(
+  aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, label = symbol, size = 1), data = CIN.DE.c.deseqWald.cutoff %>% filter(symbol %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) +  scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 10)
+
+if(export){
+  ggsave(file=paste0(source.output.dir,"/scdeseqWald_x_bulk_log2fc_cutoff.png"), width=6, height=4, dpi=300)
+}
+
+CIN.DE.c.deseq.cutoff.f <- CIN.DE.c.deseqWald.cutoff %>% filter(!is.na(stat.bulk)) %>% filter(!is.na(stat.sc))
+
+
+cor(CIN.DE.c.deseq.cutoff.f$log2FoldChange.bulk, CIN.DE.c.deseq.cutoff.f$log2FoldChange.sc)
+```
+
+```{r}
+CIN.DE.c.deseqWald.cutoff %>% ggplot(aes(x = stat.bulk, y = stat.sc, size = sc_mean, col = abs(log2FoldChange.sc))) + geom_point() + 
+  geom_abline(slope = 1, col = "blue", alpha = 0.75) + 
+  geom_hline(yintercept = 0, alpha = 0.5) + 
+  geom_vline(xintercept = 0, alpha = 0.5) + 
+  labs(title = "CIN-High x CIN-Low", x = "Bulk Wald Stat", y = "scRNA-seq Wald Stat", size = "log norm mean counts", col = "abs(scLog2FC)") + 
+  geom_text_repel(
+  aes(x = stat.bulk, y = stat.sc, size = 1, label = symbol), data = CIN.DE.c.deseqWald.cutoff %>% filter(symbol %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) +  scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 1)
+
+if(export){
+  ggsave(file=paste0(source.output.dir,"/scdeseqWald_x_bulk_size_cutoff.png"), width=6, height=4, dpi=300)
+}
+
+CIN.DE.c.deseq.f <- CIN.DE.c.deseqWald %>% filter(!is.na(stat.bulk)) %>% filter(!is.na(stat.sc))
+
+cor(CIN.DE.c.deseq.f$stat.bulk, CIN.DE.c.deseq.f$stat.sc)
+
+# Check agreement between the sign of genes
+table(sign(CIN.DE.c.deseq.f$stat.bulk), sign(CIN.DE.c.deseq.f$stat.sc))
+
+round(prop.table(table(sign(CIN.DE.c.deseq.f$stat.bulk), sign(CIN.DE.c.deseq.f$stat.sc))), 3)
+```
+
+```{r}
+# Same plot inverting colour and size legends
+CIN.DE.c.deseqWald.cutoff %>% ggplot(aes(x = stat.bulk, y = stat.sc, size = sc_mean, col = abs(log2FoldChange.sc))) + geom_point() + 
+  geom_abline(slope = 1, col = "blue", alpha = 0.85) + 
+  geom_hline(yintercept = 0, alpha = 0.5) + 
+  geom_vline(xintercept = 0, alpha = 0.5) + 
+  labs(title = "CIN-High x CIN-Low", x = "Bulk Wald Stat", y = "scRNA-seq Wald Stat", size = "log norm mean counts", col = "abs(scLog2FC)") + 
+  geom_text_repel(
+  aes(x = stat.bulk, y = stat.sc, label = symbol, size = 1), data = CIN.DE.c.deseqWald.cutoff %>% filter(symbol %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 2)
+
+```
+
+```{r}
+# Investigating mean x log fold change and stat
+CIN.DE.c.deseq.f %>% ggplot(aes(x = log2FoldChange.sc, y = sc_mean, col = abs(stat.sc))) + geom_point(alpha = 0.8) + scale_color_gradient(low="gray", high="blue")
+CIN.DE.c.deseq.f %>% ggplot(aes(x = abs(log2FoldChange.sc), y = sc_mean, col = abs(stat.sc))) + geom_point(alpha = 0.8) + scale_color_gradient(low="gray", high="blue")
+CIN.DE.c.deseq.f %>% ggplot(aes(x = stat.sc, y = sc_mean, col = abs(log2FoldChange.sc))) + geom_point(alpha = 0.8) + scale_color_gradient(low="gray", high="blue")
+CIN.DE.c.deseq.f %>% ggplot(aes(x = abs(stat.sc), y = sc_mean, col = abs(log2FoldChange.sc))) + geom_point(alpha = 0.8) + scale_color_gradient(low="gray", high="blue")
+
+cor(abs(CIN.DE.c.deseq.f$log2FoldChange.sc), CIN.DE.c.deseq.f$sc_mean)
+cor(abs(CIN.DE.c.deseq.f$stat.sc), CIN.DE.c.deseq.f$sc_mean)
+
+
+CIN.DE.c.deseq.f %>% ggplot(aes(x = abs(log2FoldChange.sc), y = sc_mean_count, col = abs(stat.sc))) + geom_point() + scale_color_gradient(low="gray", high="blue")
+
+
+CIN.DE.c.deseq.f %>% ggplot(aes(y = abs(stat.sc), x = sc_mean_count, col = abs(log2FoldChange.sc))) + geom_point(alpha = 0.8) + scale_color_gradient(low="gray", high="blue") + scale_x_continuous(trans = "log10")
+
+cor(abs(CIN.DE.c.deseq.f$log2FoldChange.sc), CIN.DE.c.deseq.f$sc_mean_count)
+cor(abs(CIN.DE.c.deseq.f$stat.sc), CIN.DE.c.deseq.f$sc_mean_count)
+
+
+```
+```{r}
+CIN.DE.c.deseq.f
+```
+
+```{r}
+CIN.DE.c_noLFC <- CIN.DE.c_noLFC %>% mutate(sc_bulk_ratio = avg_log2FC/log2FoldChange, bulk_sc_ratio = log2FoldChange/avg_log2FC) %>% left_join(sc_means)
+
+CIN.DE.c_noLFC %>% select(sc_bulk_ratio, bulk_sc_ratio, baseMean, sc_mean) %>% summary()
+
+CIN.DE.c_noLFC %>% ggplot(aes(sc_bulk_ratio)) + geom_histogram(col = "blue", bins = 1000) + labs(title = "CIN-High x CIN-Low", x = "scRNA-seq/Bulk Log2FC transcriptomics", y = "Count")
+
+CIN.DE.c_noLFC %>% ggplot(aes(sc_bulk_ratio)) + geom_histogram(col = "blue", bins = 100) + labs(title = "CIN-High x CIN-Low", x = "scRNA-seq/Bulk Log2FC transcriptomics", y = "Count") + xlim(-10, 10)
+
+```
+
+
+```{r}
+CIN.DE.c_noLFC %>% ggplot(aes(x = sc_bulk_ratio, y = baseMean, col = log(pvalue))) + geom_point()  + geom_text_repel(
+  aes(x = sc_bulk_ratio, y = baseMean, label = symbol), data = CIN.DE.c_noLFC %>% filter(abs(sc_bulk_ratio) > 10), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + scale_color_gradient2(low="blue", mid = "black", high="red", midpoint = -2)
+
+CIN.DE.c_noLFC %>% ggplot(aes(x = sc_bulk_ratio, y = baseMean, col = log(pvalue))) + geom_point()  + geom_text_repel(
+  aes(x = sc_bulk_ratio, y = baseMean, label = symbol), data = CIN.DE.c_noLFC %>% filter(abs(sc_bulk_ratio) > 10), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + xlim(-100, 100) + scale_color_gradient2(low="blue", mid = "black", high="red", midpoint = -2)
+
+CIN.DE.c_noLFC %>% ggplot(aes(x = bulk_sc_ratio, y = baseMean, col = log(pvalue))) + geom_point()  + geom_text_repel(
+  aes(x = bulk_sc_ratio, y = baseMean, label = symbol), data = CIN.DE.c_noLFC %>% filter(abs(sc_bulk_ratio) > 10), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + scale_color_gradient2(low="blue", mid = "black", high="red", midpoint = -2)
+
+CIN.DE.c_noLFC %>% ggplot(aes(x = sc_bulk_ratio, y = baseMean, col = sc_mean)) + geom_point()  + geom_text_repel(
+  aes(x = sc_bulk_ratio, y = baseMean, label = symbol), data = CIN.DE.c_noLFC %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  )
+```
+
+
+```{r}
+CIN.DE.c_noLFC %>% ggplot(aes(x = sc_mean, y = baseMean, col = log(pvalue))) + geom_point()  + geom_text_repel(
+  aes(x = sc_mean, y = baseMean, label = symbol), data = CIN.DE.c_noLFC %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  )
+
+CIN.DE.c_noLFC %>% filter(pvalue < 0.01) %>% ggplot(aes(x = sc_mean, y = baseMean, col = log(pvalue))) + geom_point()  + geom_text_repel(
+  aes(x = sc_mean, y = baseMean, label = symbol), data = CIN.DE.c_noLFC %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  )
+```
+
+# Load msigdb hallmarks gene set
+```{r}
+all_gene_sets <- msigdbr("Homo sapiens")
+
+msigdb_hallmarks_set <- filter(all_gene_sets, gs_cat == "H") %>% select(gs_name, gene_symbol)
+
+msigdb_hallmarks_set <- split(msigdb_hallmarks_set$gene_symbol, msigdb_hallmarks_set$gs_name)
+
+msigdb_hallmarks_names <- read.csv2("data/names_hallmarks.csv")
+
+rm(all_gene_sets)
+# Another option is loading files with gene sets
+# msigdb_hallmarks <- gmtPathways("data/h.all.v7.4.symbols.gmt")
+# msigdb_hallmarks %>% head() %>% lapply(head)
+
+```
+
+# Compare specific hallmarks
+## CIN signature
+```{r}
+# Label genes in bulk CIN signature
+CIN.DE.c.deseqWald %>% filter(gene %in% CIN_signature) %>% ggplot(aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = sc_mean, col = abs(stat.sc))) + geom_point() + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low CIN Signature", x = "Bulk transcriptomics Log2FC", y = "scRNA-seq transcriptomics Log2FC", size = "log norm mean counts", col = "abs(scStat)") + geom_text_repel(
+  aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = 0.5, label = symbol), data = CIN.DE.c.deseqWald %>% filter(gene %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 5)
+
+CIN.DE.c.deseqWald %>% filter(gene %in% CIN_signature) %>% ggplot(aes(x = stat.bulk, y = stat.sc, size = sc_mean, col = abs(log2FoldChange.sc))) + geom_point() + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low CIN Signature", x = "Bulk transcriptomics Stat", y = "scRNA-seq transcriptomics Stat", size = "log norm mean counts", col = "abs(scLog2FC)") + geom_text_repel(
+  aes(x = stat.bulk, y = stat.sc, size = 0.5, label = symbol), data = CIN.DE.c.deseqWald %>% filter(gene %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 2)
+
+```
+
+## Inflammatory Response
+```{r}
+# Label genes from the inflammatory response
+CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_INFLAMMATORY_RESPONSE) %>% ggplot(aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = sc_mean, col = abs(stat.sc))) + geom_point() + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low Inflammatory Response", x = "Bulk transcriptomics Log2FC", y = "scRNA-seq transcriptomics Log2FC", size = "log norm mean counts", col = "abs(scStat)") + geom_text_repel(
+  aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = 1, label = symbol), data = CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_INFLAMMATORY_RESPONSE), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 5)
+
+
+CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_INFLAMMATORY_RESPONSE) %>% ggplot(aes(x = stat.bulk, y = stat.sc, size = sc_mean, col = abs(log2FoldChange.sc))) + geom_point(alpha = 0.8) + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low Inflammatory Response", x = "Bulk transcriptomics Stat", y = "scRNA-seq transcriptomics Stat", size = "log norm mean counts", col = "abs(scLog2FC)") + geom_text_repel(
+  aes(x = stat.bulk, y = stat.sc, label = symbol, size = 1), data = CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_INFLAMMATORY_RESPONSE), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 2)
+```
+
+## EMT
+```{r}
+CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION) %>% ggplot(aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = sc_mean, col = abs(stat.sc))) + geom_point() + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low EMT", x = "Bulk transcriptomics Log2FC", y = "scRNA-seq transcriptomics Log2FC", size = "log norm mean counts", col = "abs(scStat)") + geom_text_repel(
+  aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = 1, label = symbol), data = CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 5)
+
+CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION) %>% ggplot(aes(x = stat.bulk, y = stat.sc, size = sc_mean, col = abs(log2FoldChange.sc))) + geom_point(alpha = 0.8) + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low EMT", x = "Bulk transcriptomics Stat", y = "scRNA-seq transcriptomics Stat", size = "log norm mean counts", col = "abs(scLog2FC)") + geom_text_repel(
+  aes(x = stat.bulk, y = stat.sc, label = symbol, size = 1), data = CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5))  + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 2)
+```
+
+## NFkB
+```{r}
+CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_TNFA_SIGNALING_VIA_NFKB) %>% ggplot(aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = sc_mean, col = abs(stat.sc))) + geom_point() + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low TNFa via NFkB", x = "Bulk transcriptomics Log2FC", y = "scRNA-seq transcriptomics Log2FC", size = "log norm mean counts", col = "abs(scStat)") + geom_text_repel(
+  aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = 1, label = symbol), data = CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_TNFA_SIGNALING_VIA_NFKB), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 5)
+
+CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_TNFA_SIGNALING_VIA_NFKB) %>% ggplot(aes(x = stat.bulk, y = stat.sc, size = sc_mean, col = abs(log2FoldChange.sc))) + geom_point(alpha = 0.8) + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low TNFa via NFkB", x = "Bulk transcriptomics Stat", y = "scRNA-seq transcriptomics Stat", size = "log norm mean counts", col = "abs(scLog2FC)") + geom_text_repel(
+  aes(x = stat.bulk, y = stat.sc, label = symbol, size = 1), data = CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_TNFA_SIGNALING_VIA_NFKB), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 2)
+```
+## IFNa
+```{r}
+CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_INTERFERON_ALPHA_RESPONSE) %>% ggplot(aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = sc_mean, col = abs(stat.sc))) + geom_point() + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low IFN-a", x = "Bulk transcriptomics Log2FC", y = "scRNA-seq transcriptomics Log2FC", size = "log norm mean counts", col = "abs(scStat)") + geom_text_repel(
+  aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = 1, label = symbol), data = CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_INTERFERON_ALPHA_RESPONSE), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 5)
+
+CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_INTERFERON_ALPHA_RESPONSE) %>% ggplot(aes(x = stat.bulk, y = stat.sc, size = sc_mean, col = abs(log2FoldChange.sc))) + geom_point(alpha = 0.8) + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low IFN-a", x = "Bulk transcriptomics Stat", y = "scRNA-seq transcriptomics Stat", size = "log norm mean counts", col = "abs(scLog2FC)") + geom_text_repel(
+  aes(x = stat.bulk, y = stat.sc, label = symbol, size = 1), data = CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_INTERFERON_ALPHA_RESPONSE), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5))  + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 2)
+```
+
+## IFNy
+```{r}
+CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_INTERFERON_GAMMA_RESPONSE) %>% ggplot(aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = sc_mean, col = abs(stat.sc))) + geom_point() + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low IFN-y", x = "Bulk transcriptomics Log2FC", y = "scRNA-seq transcriptomics Log2FC", size = "log norm mean counts", col = "abs(scStat)") + geom_text_repel(
+  aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = 1, label = symbol), data = CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_INTERFERON_GAMMA_RESPONSE), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 5)
+
+CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_INTERFERON_GAMMA_RESPONSE) %>% ggplot(aes(x = stat.bulk, y = stat.sc, size = sc_mean, col = abs(log2FoldChange.sc))) + geom_point(alpha = 0.8) + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low IFN-y", x = "Bulk transcriptomics Stat", y = "scRNA-seq transcriptomics Stat", size = "log norm mean counts", col = "abs(scLog2FC)") + geom_text_repel(
+  aes(x = stat.bulk, y = stat.sc, label = symbol, size = 1), data = CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_INTERFERON_GAMMA_RESPONSE), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5))  + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 2)
+```
+
+## KRAS Signaling Up
+```{r}
+CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_KRAS_SIGNALING_UP) %>% ggplot(aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = sc_mean, col = abs(stat.sc))) + geom_point() + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low KRAS Signaling", x = "Bulk transcriptomics Log2FC", y = "scRNA-seq transcriptomics Log2FC", size = "log norm mean counts", col = "abs(scStat)") + geom_text_repel(
+  aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = 1, label = symbol), data = CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_KRAS_SIGNALING_UP), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 5)
+
+CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_KRAS_SIGNALING_UP) %>% ggplot(aes(x = stat.bulk, y = stat.sc, size = sc_mean, col = abs(log2FoldChange.sc))) + geom_point(alpha = 0.8) + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low KRAS Signaling", x = "Bulk transcriptomics Stat", y = "scRNA-seq transcriptomics Stat", size = "log norm mean counts", col = "abs(scLog2FC)") + geom_text_repel(
+  aes(x = stat.bulk, y = stat.sc, label = symbol, size = 1), data = CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_KRAS_SIGNALING_UP), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5))  + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 2)
+```
+
+## IL2-STAT5
+```{r}
+CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_IL2_STAT5_SIGNALING) %>% ggplot(aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = sc_mean, col = abs(stat.sc))) + geom_point() + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low IL2-STAT5", x = "Bulk transcriptomics Log2FC", y = "scRNA-seq transcriptomics Log2FC", size = "log norm mean counts", col = "abs(scStat)") + geom_text_repel(
+  aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = 1, label = symbol), data = CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_IL2_STAT5_SIGNALING), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5)) + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 5)
+
+
+CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_IL2_STAT5_SIGNALING) %>% ggplot(aes(x = stat.bulk, y = stat.sc, size = sc_mean, col = abs(log2FoldChange.sc))) + geom_point(alpha = 0.8) + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) + geom_abline(slope = 1, intercept = 0, color = "blue", alpha = 0.5) + labs(title = "CIN-High x CIN-Low IL2-STAT5", x = "Bulk transcriptomics Stat", y = "scRNA-seq transcriptomics Stat", size = "log norm mean counts", col = "abs(scLog2FC)") + geom_text_repel(
+  aes(x = stat.bulk, y = stat.sc, label = symbol, size = 1), data = CIN.DE.c.deseqWald %>% filter(gene %in% msigdb_hallmarks_set$HALLMARK_IL2_STAT5_SIGNALING), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + theme(plot.title = element_text(hjust = 0.5))  + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 2)
+```
+# CIN High x CIN Low
+## FGSEA
+```{r}
+# Pseudocounts 1
+CIN_fc_rnk <- CIN.DE %>% select(gene, avg_log2FC) %>% deframe()
+
+fgseaRes <- read.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_CIN_highlow.csv"))
+
+
+# fgseaRes <- fgsea(pathways = msigdb_hallmarks_set, 
+#                   stats    = CIN_fc_rnk,
+#                   minSize  = 15,
+#                   maxSize  = 500)
+# 
+# fgseaRes <- fgseaRes %>% mutate(within_threshold = pval < 0.05, "Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low")) %>% left_join(msigdb_hallmarks_names)
+
+plotEnrichment(msigdb_hallmarks_set[["HALLMARK_KRAS_SIGNALING_UP"]],
+               CIN_fc_rnk) + labs(title="KRAS Signaling")
+
+plotEnrichment(msigdb_hallmarks_set[["HALLMARK_INFLAMMATORY_RESPONSE"]],
+               CIN_fc_rnk) + labs(title="Inflammatory Response")
+
+#fgseaRes %>% select(-leadingEdge) %>% write.csv2("data/fgsea_cin_high_low.csv")
+
+fgseaRes %>% mutate(padj = ifelse(padj < 0.001, 0.00101, padj)) %>% ggplot(aes(x = log10(padj), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(padj), y = NES, label = name), data = fgseaRes %>% filter(within_threshold | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+  ) +
+  labs(x = "log10(padj)", y = "Normalized Enrichment Score", col = "Enriched in") + 
+  scale_y_continuous(limits = c(-2,2), breaks = seq(-2,2,1)) + 
+  scale_x_continuous(trans = "reverse", limits = c(0, -3), breaks = c(-3, -2, -1, 0) , labels = c("<0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+
+if (export){
+# png(filename="data/fGSEA_scRNA_results_fc.png", width=800, height=500)
+ggsave(file = paste0(source.output.dir, "/fGSEA_scRNA_results_fc.png"), width=8, height=5, dpi=300)
+}
+
+if(export){
+  fgseaRes %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_CIN_highlow.csv"), row.names = FALSE)
+}
+
+```
+## FGSEA CIN2
+```{r}
+# Pseudocounts 0.001
+CIN_fc_rnk2 <- CIN.DE2 %>% select(gene, avg_log2FC) %>% deframe()
+
+fgseaRes2 <- read.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_CIN_highlow2.csv"))
+ 
+# fgseaRes2 <- fgsea(pathways = msigdb_hallmarks_set, 
+#                   stats    = CIN_fc_rnk2,
+#                   minSize  = 15,
+#                   maxSize  = 500)
+# 
+# fgseaRes2 <- fgseaRes2 %>% mutate(within_threshold = pval < 0.05, "Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low")) %>% left_join(msigdb_hallmarks_names)
+
+plotEnrichment(msigdb_hallmarks_set[["HALLMARK_KRAS_SIGNALING_UP"]],
+               CIN_fc_rnk2) + labs(title="KRAS Signaling")
+
+plotEnrichment(msigdb_hallmarks_set[["HALLMARK_INFLAMMATORY_RESPONSE"]],
+               CIN_fc_rnk2) + labs(title="Inflammatory Response")
+
+#fgseaRes %>% select(-leadingEdge) %>% write.csv2("data/fgsea_cin_high_low.csv")
+# fgseaRes2 %>% select(NES, padj) %>% summary()
+
+fgseaRes2 %>% mutate(pval = ifelse(pval < 0.001, 0.00101, pval)) %>% ggplot(aes(x = log10(pval), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(pval), y = NES, label = name), data = fgseaRes2 %>% filter(within_threshold | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) +
+  labs(x = "log10(FDR.q)", y = "Normalized Enrichment Score", col = "Enriched in") + 
+  scale_y_continuous(limits = c(-2,2), breaks = seq(-2,2,1)) + 
+  scale_x_continuous(trans = "reverse", limits = c(0, -3), breaks = c(-3, -2, -1, 0) , labels = c("<0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+
+if (export){
+# png(filename="data/fGSEA_scRNA_results_fc.png", width=800, height=500)
+ggsave(file = paste0(source.output.dir, "/fGSEA_scRNA_results_fc2.png"), width=8, height=5, dpi=300)
+}
+
+if(export){
+  fgseaRes2 %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_CIN_highlow2.csv"), row.names = FALSE)
+}
+
+```
+## FGSEA CIN2 cutoff
+```{r}
+CIN_fc_rnk2.cutoff <- CIN.DE2.cutoff %>% select(gene, avg_log2FC) %>% deframe()
+
+fgseaRes2.cutoff <- read.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_CIN_highlow2.cutoff.csv"))
+
+# fgseaRes2.cutoff <- fgsea(pathways = msigdb_hallmarks_set,
+#                   stats    = CIN_fc_rnk2.cutoff,
+#                   minSize  = 15,
+#                   maxSize  = 500)
+
+# fgseaRes2.cutoff <- fgseaRes2.cutoff %>% mutate(within_threshold = padj < 0.2, "Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low")) %>% left_join(msigdb_hallmarks_names)
+
+#fgseaRes %>% select(-leadingEdge) %>% write.csv2("data/fgsea_cin_high_low.csv")
+fgseaRes2.cutoff %>% select(NES, padj) %>% summary()
+
+fgseaRes2.cutoff %>% mutate(padj = ifelse(padj < 0.0001, 0.000101, padj)) %>% ggplot(aes(x = log10(padj), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(padj), y = NES, label = name), data = fgseaRes2.cutoff %>% mutate(padj = ifelse(padj < 0.0001, 0.000101, padj)) %>% filter(within_threshold | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) +
+  labs(x = "log10(FDRq)", y = "Normalized Enrichment Score", col = "Enriched in") + 
+  scale_y_continuous(limits = c(-2,2.5), breaks = seq(-2,2.5,1)) + 
+  scale_x_continuous(trans = "reverse", limits = c(0, -4), breaks = c(-4, -3, -2, -1, 0) , labels = c("<0.0001", "0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+
+if (export){
+# png(filename="data/fGSEA_scRNA_results_fc.png", width=800, height=500)
+ggsave(file = paste0(source.output.dir, "/fGSEA_scRNA_results_fc2.cutoff.png"), width=8, height=5, dpi=300)
+}
+
+if(export){
+  fgseaRes2.cutoff %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_CIN_highlow2.cutoff.csv"), row.names = FALSE)
+}
+
+```
+
+```{r}
+CIN.DE.glmGamPoi %>% ggplot(aes(x = lfc)) + geom_histogram()
+
+CIN.DE.glmGamPoi %>% mutate(lfc = ifelse(abs(lfc) > 7, (7 + abs(lfc/1e8)) * sign(lfc), lfc)) %>% ggplot(aes(x = lfc)) + geom_histogram()
+
+test <- CIN.DE.glmGamPoi %>% mutate(lfc = ifelse(abs(lfc) > 7, (7 + abs(lfc/1e8)) * sign(lfc), lfc)) %>% arrange(-lfc)
+```
+
+## FGSEA Gamma Poison lfc
+```{r}
+fgseaRes.gampoi <- read.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_CIN_highlow_gampoi.csv"))
+
+# CIN_fc_rnk.gampoi <- CIN.DE.glmGamPoi %>% select(gene, lfc) %>% deframe()
+
+# fgseaRes.gampoi <- fgsea(pathways = msigdb_hallmarks_set,
+#                   stats    = CIN_fc_rnk.gampoi,
+#                   minSize  = 15,
+#                   maxSize  = 500)
+
+# fgseaRes.gampoi <- fgseaRes.gampoi %>% mutate(within_threshold = padj < 0.05, "Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low")) %>% left_join(msigdb_hallmarks_names)
+
+fgseaRes.gampoi %>% mutate(padj = ifelse(padj < 0.0001, 0.000101, padj)) %>% ggplot(aes(x = log10(padj), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(padj), y = NES, label = name), data = fgseaRes.gampoi %>% mutate(padj = ifelse(pval < 0.0001, 0.000101, padj)) %>% filter(within_threshold | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+  ) +
+  labs(x = "log10(FDRq)", y = "Normalized Enrichment Score", col = "Enriched in") + 
+  scale_y_continuous(limits = c(-3,3), breaks = seq(-3,3,1)) + 
+  scale_x_continuous(trans = "reverse", limits = c(0, -4), breaks = c(-4, -3, -2, -1, 0) , labels = c("<0.0001", "0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+
+if (export){
+  ggsave(file = paste0(source.output.dir, "/fGSEA_scRNA_results_gampoi.png"), width=8, height=5, dpi=300)
+}
+
+if(export){
+  fgseaRes.gampoi %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_CIN_highlow_gampoi.csv"), row.names = FALSE)
+}
+
+```
+## FGSEA Poisson alt
+```{r}
+# CIN_fc_rnk.gampoi2 <- CIN.DE.glmGamPoi %>% mutate(rank = ifelse(abs(lfc) > 7, (7 + abs(lfc/1e7)) * sign(lfc), lfc)) %>% mutate(rank = rank * -log10(pval + 1e-200)) %>% select(gene, rank) %>% deframe()
+
+CIN_fc_rnk.gampoi2 <- CIN.DE.glmGamPoi %>% mutate(rank_stat = lfc * -log10(pval + 1e-200)) %>% select(gene, rank_stat) %>% deframe()
+
+# CIN_fc_rnk.gampoi2 <- CIN.DE.glmGamPoi %>% mutate(rank = lfc * -log10(pval + 1e-200)) %>% arrange(-rank) %>% rownames_to_column("order") %>% mutate(order = as.numeric(order)) %>% select(gene, order) %>% deframe()
+
+fgseaRes.gampoi2 <- fgsea(pathways = msigdb_hallmarks_set,
+                  stats    = CIN_fc_rnk.gampoi2,
+                  minSize  = 15,
+                  maxSize  = 500)
+
+fgseaRes.gampoi2 <- fgseaRes.gampoi2 %>% mutate(within_threshold = padj < 0.05, "Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low")) %>% left_join(msigdb_hallmarks_names)
+
+fgseaRes.gampoi2 %>% mutate(padj = ifelse(padj < 0.0001, 0.000101, padj)) %>% ggplot(aes(x = log10(padj), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(padj), y = NES, label = name), data = fgseaRes.gampoi2 %>% filter(within_threshold | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")) %>% mutate(padj = ifelse(pval < 0.0001, 0.000101, padj)), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+  ) +
+  labs(x = "log10(FDRq)", y = "Normalized Enrichment Score", col = "Enriched in") + 
+  scale_y_continuous(limits = c(-3,3), breaks = seq(-3,3,1)) + 
+  scale_x_continuous(trans = "reverse", limits = c(0, -4), breaks = c(-4, -3, -2, -1, 0) , labels = c("<0.0001", "0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+
+
+if (export){
+  ggsave(file = paste0(source.output.dir, "/fGSEA_scRNA_results_gampoi2.png"), width=8, height=5, dpi=300)
+}
+
+if(export){
+  fgseaRes.gampoi2 %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_CIN_highlow_gampoi2.csv"), row.names = FALSE)
+}
+```
+
+```{r}
+CIN.DE.glmGamPoi.rank <- CIN.DE.glmGamPoi %>% mutate(rank_stat = lfc * -log10(pval + 1e-200)) %>% arrange(-rank_stat) 
+
+CIN.DE.glmGamPoi.rank <- CIN.DE.glmGamPoi.rank %>% filter(lfc >= 0) %>% mutate(ranking = rank(rank_stat)) %>% rbind(
+  CIN.DE.glmGamPoi.rank %>% filter(lfc < 0) %>% mutate(ranking = -rank(abs(rank_stat)))
+)
+
+CIN_fc_rnk.gampoi.rank <- CIN.DE.glmGamPoi.rank %>% select(gene, ranking) %>% deframe()
+
+# CIN_fc_rnk.gampoi2 <- CIN.DE.glmGamPoi %>% mutate(rank = lfc * -log10(pval + 1e-200)) %>% arrange(-rank) %>% rownames_to_column("order") %>% mutate(order = as.numeric(order)) %>% select(gene, order) %>% deframe()
+
+fgseaRes.gampoi.rank <- fgsea(pathways = msigdb_hallmarks_set,
+                  stats    = CIN_fc_rnk.gampoi.rank,
+                  minSize  = 15,
+                  maxSize  = 500)
+
+fgseaRes.gampoi.rank <- fgseaRes.gampoi.rank %>% mutate(within_threshold = padj < 0.05, "Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low")) %>% left_join(msigdb_hallmarks_names)
+
+fgseaRes.gampoi.rank %>% mutate(padj = ifelse(padj < 0.0001, 0.000101, padj)) %>% ggplot(aes(x = log10(padj), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(padj), y = NES, label = name), data = fgseaRes.gampoi.rank %>% filter(within_threshold | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")) %>% mutate(padj = ifelse(pval < 0.0001, 0.000101, padj)), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+  ) +
+  labs(x = "log10(FDRq)", y = "Normalized Enrichment Score", col = "Enriched in") + 
+  scale_y_continuous(limits = c(-3,3), breaks = seq(-3,3,1)) + 
+  scale_x_continuous(trans = "reverse", limits = c(0, -4), breaks = c(-4, -3, -2, -1, 0) , labels = c("<0.0001", "0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+
+```
+
+## FGSEA DESeq LFC
+```{r}
+fgseaRes.deseq <- read.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_deseq.csv"))
+
+# CIN_fc_rnk.deseq <- df.deseq.results.sc %>% select(gene, log2FoldChange) %>% deframe()
+# 
+# fgseaRes.deseq <- fgsea(pathways = msigdb_hallmarks_set,
+#                   stats    = CIN_fc_rnk.deseq,
+#                   minSize  = 15,
+#                   maxSize  = 500)
+# 
+# fgseaRes.deseq <- fgseaRes.deseq %>% mutate(within_threshold = padj < 0.05, "Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low")) %>% left_join(msigdb_hallmarks_names)
+
+fgseaRes.deseq %>% mutate(padj = ifelse(pval < 0.0001, 0.000101, pval)) %>% ggplot(aes(x = log10(pval), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(pval), y = NES, label = name), data = fgseaRes.deseq %>% filter(within_threshold | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")) %>% mutate(pval = ifelse(pval < 0.0001, 0.000101, pval)), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+  ) +
+  labs(x = "log10(pval)", y = "Normalized Enrichment Score", col = "Enriched in") + 
+  scale_y_continuous(limits = c(-3,3), breaks = seq(-3,3,1)) + 
+  scale_x_continuous(trans = "reverse", limits = c(0, -4), breaks = c(-4, -3, -2, -1, 0) , labels = c("<0.0001", "0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+
+if (export){
+ggsave(file = paste0(source.output.dir, "/fGSEA_scRNA_deseq.png"), width=8, height=5, dpi=300)
+}
+
+if(export){
+  fgseaRes.deseq %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_deseq.csv"), row.names = FALSE)
+}
+
+```
+## FGSEA DESeq Stat
+```{r}
+fgseaRes.deseqstat <- read.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_deseqstat.csv"))
+
+CIN_fc_rnk.deseqstat <- df.deseq.results.scWald %>% select(gene, stat) %>% deframe()
+ 
+# fgseaRes.deseqstat <- fgsea(pathways = msigdb_hallmarks_set,
+#                   stats    = CIN_fc_rnk.deseqstat,
+#                   minSize  = 15,
+#                   maxSize  = 500)
+
+# fgseaRes.deseqstat <- fgseaRes.deseqstat %>% mutate(within_threshold = padj < 0.05, "Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low")) %>% left_join(msigdb_hallmarks_names)
+
+fgseaRes.deseqstat %>% mutate(padj = ifelse(padj < 0.0001, 0.000101, padj)) %>% ggplot(aes(x = log10(padj), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(padj), y = NES, label = name), data = fgseaRes.deseqstat %>% filter(within_threshold | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")) %>% mutate(padj = ifelse(padj < 0.0001, 0.000101, padj)), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+  ) +
+  labs(x = "log10(padj)", y = "Normalized Enrichment Score", col = "Enriched in") + 
+  scale_y_continuous(limits = c(-2,2), breaks = seq(-2,2,1)) + 
+  scale_x_continuous(trans = "reverse", limits = c(0, -3), breaks = c(-3, -2, -1, 0) , labels = c("<0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+
+if (export){
+ggsave(file = paste0(source.output.dir, "/fGSEA_scRNA_deseqstat.png"), width=8, height=5, dpi=300)
+}
+
+# leading_edge <- fgseaRes.deseqstat %>% select(pathway, leadingEdge)
+# leading_edge$leadingEdge <- leading_edge$leadingEdge %>% as.character()
+
+if(export){
+  fgseaRes.deseqstat %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_deseqstat.csv"), row.names = FALSE)
+  
+  # leading_edge %>% write.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_deseqstat_leadingedge.csv"), row.names = FALSE)
+}
+
+```
+
+## GSEA
+```{r}
+# GSEA results
+GSEA_pos <- read.table("data/scRNA_cinhighlow_hallmarks_fc.GseaPreranked.1619184220473/gsea_report_for_na_pos_1619184220473.tsv", header = TRUE, sep = "\t")
+
+GSEA_neg <- read.table("data/scRNA_cinhighlow_hallmarks_fc.GseaPreranked.1619184220473/gsea_report_for_na_neg_1619184220473.tsv", header = TRUE, sep = "\t")
+
+GSEA_res <- rbind(GSEA_pos, GSEA_neg) %>% mutate(within_threshold = FDR.q.val < 0.3) %>% mutate("Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low")) %>% left_join(msigdb_hallmarks_names %>% dplyr::rename("NAME" = pathway))
+
+GSEA_res %>% mutate(pval = ifelse(FDR.q.val < 0.001, 0.00101, FDR.q.val)) %>% 
+  ggplot(aes(x = log10(FDR.q.val), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(FDR.q.val), y = NES, label = name), data = GSEA_res %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+  ) +
+  labs(x = "log10(FDRq)", y = "Normalized Enrichment Score", col = "Enriched in") + 
+  scale_y_continuous(limits = c(-2,2), breaks = seq(-2,2,1)) + 
+  scale_x_continuous(trans = "reverse", limits = c(0, -3), breaks = c(-3, -2, -1, 0) , labels = c("<0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+
+if (export){
+# png(filename="data/GSEA_scRNA_results_fc.png", width=800, height=500)
+ggsave(file = paste0(source.output.dir, "/GSEA_scRNA_results_fc.png"), width=8, height=5, dpi=300)
+}
+
+
+# GSEA_pos <- read.table("data/scRNA_cinhighlow_hallmarks_pval.GseaPreranked.1619184161366/gsea_report_for_na_pos_1619184161366.tsv", header = TRUE, sep = "\t")
+# 
+# GSEA_neg <- read.table("data/scRNA_cinhighlow_hallmarks_pval.GseaPreranked.1619184161366/gsea_report_for_na_neg_1619184161366.tsv", header = TRUE, sep = "\t")
+# 
+# GSEA_res <- rbind(GSEA_pos, GSEA_neg) %>% mutate(within_threshold = FDR.q.val < 0.3) %>% mutate("Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low"))  %>% left_join(msigdb_hallmarks_names %>% dplyr::rename("NAME" = pathway))
+# 
+# GSEA_res %>% mutate(pval = ifelse(FDR.q.val < 0.001, 0.00101, FDR.q.val)) %>% 
+#   ggplot(aes(x = log10(FDR.q.val), y = NES)) +
+#   geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
+#   geom_hline(yintercept = 0, col = "black") +
+#   geom_text_repel(
+#   aes(x = log10(FDR.q.val), y = NES, label = name), data = GSEA_res %>% filter(within_threshold), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0
+#   ) +
+#   labs(x = "log10(FDRq)", y = "Normalized Enrichment Score", col = "Enriched in") + 
+#   scale_y_continuous(limits = c(-2,2), breaks = seq(-2,2,1)) + 
+#   scale_x_continuous(trans = "reverse", limits = c(0, -3), breaks = c(-3, -2, -1, 0) , labels = c("<0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE)
+# 
+# if (export){
+# ggsave(file = paste0(source.output.dir, "/GSEA_scRNA_results_pval.png"), width=8, height=5, dpi=300)
+# }
+
+rm(GSEA_pos)
+rm(GSEA_neg)
+
+```
+## Compare with Bulk GSEA NES
+```{r}
+Bulk_gsea <- read.csv2("data/Supp_table6.csv")
+
+# GSEA x Bulk
+GSEA_comp <- Bulk_gsea %>% select(NAME, NES, FDR.q.val) %>% rename(BULK_NES = NES, BULK_FDR.q.val = FDR.q.val) %>% left_join(
+  GSEA_res %>% select(NAME, NES, FDR.q.val) %>% rename(scNES = NES, scFDR.q.val = FDR.q.val) 
+) %>% left_join(
+  msigdb_hallmarks_names %>% rename(NAME = pathway)
+  ) %>% mutate(sign_agreement = sign(BULK_NES) == sign(scNES))
+
+GSEA_comp %>% ggplot(aes(x = BULK_NES, y = scNES, col = log10(scFDR.q.val+1e-300), shape = scFDR.q.val < 0.2)) +
+  geom_point() + geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = BULK_NES, y = scNES, label = name), data = GSEA_comp %>% filter(!sign_agreement), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + labs(x = "Bulk GSEA NES", y = "scRNA GSEA NES") +
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -1)
+```
+
+```{r}
+# sc FGSEA x Bulk
+fGSEA_comp <- Bulk_gsea %>% select(NAME, NES, FDR.q.val) %>% rename(BULK_NES = NES, BULK_FDR.q.val = FDR.q.val) %>% left_join(
+  fgseaRes.gampoi %>% select(pathway, NES, pval, padj) %>% rename(NAME = pathway, scNES = NES, scFDRq = padj) 
+) %>% left_join(
+  msigdb_hallmarks_names %>% rename(NAME = pathway)
+  ) %>% mutate(sign_agreement = sign(BULK_NES) == sign(scNES))
+
+fGSEA_comp %>% ggplot(aes(x = BULK_NES, y = scNES, col = log10(scFDRq), shape = scFDRq < 0.2)) + 
+  geom_point() + geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = BULK_NES, y = scNES, label = name), data = fGSEA_comp %>% filter((!sign_agreement & scFDRq < 0.2) | name %in% c("Inflammatory Response")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + labs(x = "Bulk GSEA NES", y = "scRNA fGSEA NES") +
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -2)
+
+if (export){
+  ggsave(file = paste0(source.output.dir, "/fGSEA_scRNA_gampoi_x_bulk.png"), width=8, height=5, dpi=300)
+  
+    ggsave(file = paste0(source.output.dir, "/fGSEA_scRNA_gampoi_x_bulk.png"), width=6, height=4, dpi=300)
+
+}
+```
+
+```{r}
+# sc FGSEA CIN pseudocounts 0.001 cutoff 5% x Bulk
+fGSEA_comp <- Bulk_gsea %>% select(NAME, NES, FDR.q.val) %>% rename(BULK_NES = NES, BULK_FDR.q.val = FDR.q.val) %>% left_join(
+  fgseaRes2.cutoff %>% select(pathway, NES, pval, padj) %>% rename(NAME = pathway, scNES = NES, scFDRq = padj) 
+) %>% left_join(
+  msigdb_hallmarks_names %>% rename(NAME = pathway)
+  ) %>% mutate(sign_agreement = sign(BULK_NES) == sign(scNES))
+
+fGSEA_comp %>% ggplot(aes(x = BULK_NES, y = scNES, col = log10(scFDRq), shape = scFDRq < 0.2)) + 
+  geom_point() + geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = BULK_NES, y = scNES, label = name), data = fGSEA_comp %>% filter((!sign_agreement & scFDRq < 0.2) | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + labs(x = "Bulk GSEA NES", y = "scRNA fGSEA NES") +
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -2)
+
+if (export){
+  ggsave(file = paste0(source.output.dir, "/fGSEA_scRNA2_cutoff_x_bulk.png"), width=6, height=4, dpi=300)
+
+}
+```
+
+```{r}
+# sc FGSEA CIN deseq stat
+fGSEA_comp <- Bulk_gsea %>% select(NAME, NES, FDR.q.val) %>% rename(BULK_NES = NES, BULK_FDR.q.val = FDR.q.val) %>% left_join(
+  fgseaRes.deseqstat %>% select(pathway, NES, pval, padj) %>% rename(NAME = pathway, scNES = NES, scFDRq = padj) 
+) %>% left_join(
+  msigdb_hallmarks_names %>% rename(NAME = pathway)
+  ) %>% mutate(sign_agreement = sign(BULK_NES) == sign(scNES))
+
+fGSEA_comp %>% ggplot(aes(x = BULK_NES, y = scNES, col = log10(scFDRq), shape = scFDRq < 0.2)) + 
+  geom_point() + geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = BULK_NES, y = scNES, label = name), data = fGSEA_comp %>% filter((!sign_agreement & scFDRq < 0.2) | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + labs(x = "Bulk GSEA NES", y = "scRNA fGSEA NES") +
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -2)
+
+if (export){
+  ggsave(file = paste0(source.output.dir, "/fGSEA_scRNA_stat_x_bulk.png"), width=6, height=4, dpi=300)
+
+}
+```
+
+## Compare with 3 sample bulk statfgsea
+```{r}
+Bulk_gsea3samples <- read.csv2("data/bulk_fgsea_Zstat_CIN_highlow_3samples.csv")
+
+# GSEA x Bulk
+GSEA_comp <- Bulk_gsea3samples %>% select(pathway, NES, padj) %>% rename(BULK_NES = NES, BULK_FDR.q.val = padj) %>% left_join(
+  GSEA_res %>% select(NAME, NES, FDR.q.val) %>% rename(scNES = NES, scFDR.q.val = FDR.q.val, pathway = NAME) 
+) %>% left_join(
+  msigdb_hallmarks_names
+  ) %>% mutate(sign_agreement = sign(BULK_NES) == sign(scNES))
+
+GSEA_comp %>% ggplot(aes(x = BULK_NES, y = scNES, col = log10(scFDR.q.val+1e-300), shape = scFDR.q.val < 0.2)) +
+  geom_point() + geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = BULK_NES, y = scNES, label = name), data = GSEA_comp %>% filter((!sign_agreement & scFDR.q.val < 0.2) | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + labs(x = "Bulk GSEA NES", y = "scRNA GSEA NES") +
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -1)
+```
+
+```{r}
+# sc FGSEA x Bulk
+fGSEA_comp <- Bulk_gsea3samples %>% select(pathway, NES, padj) %>% rename(BULK_NES = NES, BULK_FDR.q.val = padj) %>% left_join(
+  fgseaRes.gampoi %>% select(pathway, NES, pval, padj) %>% rename(scNES = NES, scFDRq = padj) 
+) %>% left_join(
+  msigdb_hallmarks_names
+  ) %>% mutate(sign_agreement = sign(BULK_NES) == sign(scNES))
+
+fGSEA_comp %>% ggplot(aes(x = BULK_NES, y = scNES, col = log10(scFDRq), shape = scFDRq < 0.2)) + 
+  geom_point() + geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = BULK_NES, y = scNES, label = name), data = fGSEA_comp %>% filter((!sign_agreement & scFDRq < 0.2) | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + labs(x = "Bulk GSEA NES", y = "scRNA fGSEA NES") +
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -2)
+
+if (export){
+  ggsave(file = paste0(source.output.dir, "/fGSEA_scRNA_gampoi_x_bulk.png"), width=8, height=5, dpi=300)
+  
+    ggsave(file = paste0(source.output.dir, "/fGSEA_scRNA_gampoi_x_bulk.png"), width=6, height=4, dpi=300)
+
+}
+```
+
+```{r}
+# sc FGSEA CIN pseudocounts 0.001 cutoff 5% x Bulk
+fGSEA_comp <- Bulk_gsea3samples %>% select(pathway, NES, padj) %>% rename(BULK_NES = NES, BULK_FDR.q.val = padj) %>% left_join(
+  fgseaRes2.cutoff %>% select(pathway, NES, pval, padj) %>% rename(scNES = NES, scFDRq = padj) 
+) %>% left_join(
+  msigdb_hallmarks_names
+  ) %>% mutate(sign_agreement = sign(BULK_NES) == sign(scNES))
+
+fGSEA_comp %>% ggplot(aes(x = BULK_NES, y = scNES, col = log10(scFDRq), shape = scFDRq < 0.2)) + 
+  geom_point() + geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = BULK_NES, y = scNES, label = name), data = fGSEA_comp %>% filter((!sign_agreement & scFDRq < 0.2) | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + labs(x = "Bulk GSEA NES", y = "scRNA fGSEA NES") +
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -2)
+
+if (export){
+  ggsave(file = paste0(source.output.dir, "/fGSEA_scRNA2_cutoff_x_bulk.png"), width=6, height=4, dpi=300)
+
+}
+```
+
+```{r}
+# sc FGSEA CIN deseq stat
+fGSEA_comp <- Bulk_gsea3samples %>% select(pathway, NES, padj) %>% rename(BULK_NES = NES, BULK_FDR.q.val = padj) %>% left_join(
+  fgseaRes.deseqstat %>% select(pathway, NES, pval, padj) %>% rename(scNES = NES, scFDRq = padj) 
+) %>% left_join(
+  msigdb_hallmarks_names
+  ) %>% mutate(sign_agreement = sign(BULK_NES) == sign(scNES))
+
+fGSEA_comp %>% ggplot(aes(x = BULK_NES, y = scNES, col = log10(scFDRq), shape = scFDRq < 0.2)) + 
+  geom_point() + geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = BULK_NES, y = scNES, label = name), data = fGSEA_comp %>% filter((!sign_agreement & scFDRq < 0.2) | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + labs(x = "Bulk GSEA NES", y = "scRNA fGSEA NES") +
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -2)
+
+if (export){
+  ggsave(file = paste0(source.output.dir, "/fGSEA_scRNA_stat_x_bulk.png"), width=6, height=4, dpi=300)
+
+}
+```
+
+```{r}
+# Compare 3 sample bulk and 5 sample bulk
+GSEA_comp35 = Bulk_gsea %>% left_join(Bulk_gsea3samples %>% mutate("NAME" = pathway), by = "NAME", suffix = c(".5",".3")) %>% left_join(msigdb_hallmarks_names) %>% mutate(sign_agreement = sign(NES.5) == sign(NES.3)) 
+
+GSEA_comp35 %>% ggplot(aes(x = NES.5, y = NES.3, col = log10(FDR.q.val), shape = FDR.q.val < 0.2)) +
+  geom_point() + geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = NES.5, y = NES.3, label = name), data = GSEA_comp35 %>% filter(!sign_agreement), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) + labs(x = "Bulk GSEA NES", y = "scRNA GSEA NES") +
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -1)
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+```
