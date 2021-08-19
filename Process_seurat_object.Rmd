@@ -1,0 +1,235 @@
+---
+title: "Process Seurat Object in Standard Format"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  folder: ""
+  export: TRUE
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = FALSE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+# BiocManager::install("DropletUtils", "org.Hs.eg.db")
+# install.packages("Seurat", "sparseMatrixStats", "tidyverse")
+library(Seurat)
+library(sparseMatrixStats)
+library(tidyverse)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(plotly)
+
+source("Helper_functions.R")
+
+select = dplyr::select
+select = dplyr::select
+
+```
+
+```{r read_arg}
+# args = commandArgs(trailingOnly=TRUE)
+# print(args)
+print(getwd())
+```
+
+# Setup
+```{r}
+export = params$export
+folder = params$folder
+print(folder)
+
+# generate output dir path named data
+source.output.dir <- file.path(paste0(folder, "/output_sc"))
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+} else{
+  print("Output folder already exists")
+}
+
+```
+
+Loading data
+```{r Loading data}
+Seurat_object <- readRDS(file = paste0(source.output.dir, "/Seurat_object.rds"))
+
+Seurat_object[[]]$Project %>% unique()
+```
+
+# Normalize and scale
+```{r Normalize and scale}
+median_library_size <- Seurat_object@assays$RNA %>% colSums() %>% median()
+
+# Normalize dataset
+Seurat_object_n <- NormalizeData(Seurat_object, normalization.method = "LogNormalize", scale.factor = median_library_size)
+
+# find highly variable features with a variance stabilizing transform
+Seurat_object_n <- FindVariableFeatures(Seurat_object_n, selection.method = "vst", nfeatures = 2000)
+
+VariableFeaturePlot(Seurat_object_n) %>% LabelPoints(points = head(VariableFeatures(Seurat_object_n), 30), repel = TRUE)
+
+# Scale dataset
+Seurat_object_n <- ScaleData(Seurat_object_n, features = rownames(Seurat_object_n))
+
+rm(Seurat_object)
+```
+
+# Perform PCA
+```{r Perform PCA}
+# Perform PCA
+n_pcs = 200
+
+Seurat_object_n <- RunPCA(Seurat_object_n, features = VariableFeatures(object = Seurat_object_n), npcs = n_pcs)
+
+# Plot PCA results
+Idents(Seurat_object_n) <- "Sample"
+VizDimLoadings(Seurat_object_n, dims = 1:2, reduction = "pca")
+DimPlot(Seurat_object_n, reduction = "pca")
+ElbowPlot(Seurat_object_n, ndims = n_pcs)
+
+DimHeatmap(Seurat_object_n, dims = 1:10, cells = 500, balanced = TRUE)
+
+# Check the total variance explained
+# On Seurat 3:
+pca <- Seurat_object_n[["pca"]]
+# Get the total variance of the scaled counts matrix:
+mat <- Seurat::GetAssayData(Seurat_object_n, assay = "RNA", slot = "scale.data")
+mat <- mat[rownames(mat) %in% VariableFeatures(Seurat_object_n), ]
+
+total_variance <- sum(matrixStats::rowVars(mat))
+
+eigValues = (pca@stdev)^2  ## EigenValues
+varExplained = eigValues / total_variance
+
+# varExplained
+cumvar <- cumsum(varExplained) %>% as.data.frame() 
+colnames(cumvar) <- c("cumvar")
+
+cumvar %>% ggplot(aes(x = c(1:n_pcs), y = cumvar)) + geom_point() + labs(x = "PC #", y = "Cumulative Variance")
+
+rm(mat, pca, cumvar)
+```
+
+# Cell cycle assignment
+```{r Cell cycle assignment}
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+# Assign and inspect cell cycle scores
+Seurat_object_n <- CellCycleScoring(Seurat_object_n, s.features = s.genes, g2m.features = g2m.genes)
+
+Seurat_object_n[[]] %>% select(S.Score, G2M.Score, Phase) %>% mutate_if(is.character, as.factor) %>% summary()
+```
+
+# Run UMAP and TSNE
+```{r Run UMAP and TSNE}
+# Run UMAP and project in 3D dimensions
+Seurat_object_n <- RunUMAP(Seurat_object_n, dims = 1:n_pcs, n.components = 3L)
+
+# Store this UMAP as a custom reduction
+Seurat_object_n[["umap3d"]] <- CreateDimReducObject(embeddings = Seurat_object_n@reductions$umap@cell.embeddings, key = "umap3d_", assay = DefaultAssay(Seurat_object_n))
+
+# Dimensionality reduction with UMAP and tSNE on PCs
+Seurat_object_n <- RunUMAP(Seurat_object_n, dims = 1:n_pcs)
+
+# Seurat_object_n <- RunTSNE(Seurat_object_n, dims.use = 1:n_pcs, reduction.use = "pca")
+```
+
+# Clustering cells
+```{r Clustering cells}
+Seurat_object_n <- FindNeighbors(Seurat_object_n, features = VariableFeatures(object = Seurat_object_n))
+Seurat_object_n <- FindClusters(Seurat_object_n, resolution = 0.5)
+```
+
+# Visualization
+```{r Visualization}
+plot_features <- c("Sample", "orig.ident", "Phase", "annotation", "Cell_type", "Cell_subtype", "Simplified_celltype", "Cell_class", "seurat_clusters")
+
+plot_features <- plot_features[plot_features %in% colnames(Seurat_object_n[[]])]
+
+for (i in plot_features){
+  fig <- DimPlot(Seurat_object_n, reduction = "umap", group.by = i)
+  print(fig)
+}
+ 
+# for (i in plot_features){
+#   fig <- DimPlot(Seurat_object_n, reduction = "tsne", group.by = i)
+#   print(fig)
+# }
+
+rm(fig)
+```
+
+# Plotting signatures
+```{r  Plotting signatures EMT}
+# Plotting EMT signature # Supp table 5f
+EMT_signature <- c("EZH", "JUN", "VIM", "STEAP1", "SOX4", "MMP14", "SHH", "TIMP1", "ZEB1", "ZEB2", "SNAI2")
+
+EMT_signature <- EMT_signature[EMT_signature %in% rownames(Seurat_object_n@assays$RNA)]
+
+Idents(Seurat_object_n) <- "annotation"
+for(i in 1:length(EMT_signature)){
+p <- VlnPlot(Seurat_object_n, features = EMT_signature[i])
+print(p)
+rm(p)
+}
+```
+
+```{r Plotting signatures M}
+# Plotting Genes enriched in the "M" Population from Bakhoum et al Extended figure 6b 
+M_markers = c("ITGB5", "ITGB1", "ITGA5", "ITGA10", "IGFBP4", "FN1", "DSC2", "CXCL1","CTNNB1", "BMP4", "BCL2L1", "VIM", "TIMP1", "TGFBR2", "TGFBI", "TGFB1", "PPARG", "NUPR1", "MSN", "LMCD1", "LEF1", "JAG1")
+
+M_markers <- M_markers[M_markers %in% rownames(Seurat_object_n@assays$RNA)]
+
+Idents(Seurat_object_n) <- "annotation"
+for(i in 1:length(M_markers)){
+p <- VlnPlot(Seurat_object_n, features = M_markers[i])
+print(p)
+rm(p)
+}
+```
+
+```{r Plotting signatures CIN}
+# Plot CIN signature from Bakhoum et al 2018 (Supp. table 5), comparing CIN high and CIN low in bulk data
+CIN_signature <- c('PELI2','BMP2','SHH','TNS4','RAB3B','ROBO1','ARHGAP28','CHN2','CST1','F13A1','CPVL','SEMA6D','NHSL2','GTF2IP7','DPYSL3','PCDH7','KHDRBS3','TRAC','TMEM156', 'CST4','CD24','FGF5','NTN4')
+
+CIN_signature <- CIN_signature[CIN_signature %in% rownames(Seurat_object_n@assays$RNA)]
+
+Idents(Seurat_object_n) <- "annotation"
+for(i in 1:length(CIN_signature)){
+p <- VlnPlot(Seurat_object_n, features = CIN_signature[i])
+print(p)
+rm(p)
+}
+
+```
+
+# Export
+```{r Export}
+if(export){
+saveRDS(Seurat_object_n, file = paste0(source.output.dir, "/Seurat_object_n.rds"))
+}
+
+# Seurat_object_n <- readRDS(file = paste0(source.output.dir, "/Seurat_object_n.rds"))
+```
+
+# sessionInfo - Package Versions
+```{r sessionInfo}
+sessionInfo()
+# packageVersion("DESeq2")
+# packinfo <- installed.packages(fields = c("Package", "Version"))
+# packinfo[,c("Package", "Version")]
+# packinfo["graphics",c("Package", "Version")]
+
+```
+

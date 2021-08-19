@@ -1,0 +1,482 @@
+---
+title: "Nelson et al 2020 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+    export: TRUE
+
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+# BiocManager::install("DropletUtils", "org.Hs.eg.db")
+# install.packages("Seurat", "sparseMatrixStats", "tidyverse")
+library(Seurat)
+library(sparseMatrixStats)
+library(tidyverse)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(plotly)
+
+source(paste0(dirname(getwd()), "/Helper_functions.R"))
+
+select = dplyr::select
+
+```
+
+# Setup
+```{r Setup}
+export = params$export
+
+# generate output dir path named data
+source.output.dir <- file.path("output_sc")
+
+Seurat_object_name <- "scNelson"
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+} else{
+  print("Output folder already exists")
+}
+
+```
+
+# Loading data
+```{r Loading data}
+barcodes <- read.table("data/E-MTAB-8559.aggregated_filtered_counts.mtx_cols")
+
+genes <- read.table("data/E-MTAB-8559.aggregated_filtered_counts.mtx_rows")
+# matrix <- read.table("data/E-MTAB-8410.aggregated_filtered_counts.mtx", sep = "\ ", header = TRUE, fill = TRUE)
+
+matrix <- read.table("data/E-MTAB-8559.aggregated_filtered_counts.mtx", sep = "\ ", skip = 2)
+
+design <- read.table("data/ExpDesign-E-MTAB-8559.tsv", sep = "\t", header = TRUE)
+
+study_metadata = read.table(file = "data/E-MTAB-8559.sdrf.txt", header = TRUE, sep = "\t")
+
+```
+# Map ensembl IDs to gene symbols
+```{r}
+gene_features <- read.csv2(file = paste0(dirname(getwd()), "/biomaRt_gene_features.csv"))
+
+gene_map <- genes %>% rename("ensembl_gene_id" = "V1") %>% left_join(gene_features %>% select(ensembl_gene_id, hgnc_symbol)) %>% unique()
+
+gene_map %>% filter(is.na(hgnc_symbol)) %>% nrow()
+gene_map %>% filter(hgnc_symbol == "") %>% nrow()
+
+gene_map_f <- gene_map %>% filter(!is.na(hgnc_symbol)) %>% filter(hgnc_symbol != "")
+```
+
+```{r}
+# Export features and barcodes to import with Read10x function
+# write.table(genes, file = "data/data_10x_format/features.tsv", row.names=FALSE, sep="\t", col.names = FALSE, quote = FALSE)
+
+# write.table(barcodes, file = "data/data_10x_format/barcodes.tsv", row.names=FALSE, sep="\t", col.names  = FALSE , quote = FALSE)
+
+rm(barcodes, genes, matrix)
+```
+
+```{r}
+# Get genes with duplicate symbols
+duplicates <- table(gene_map_f$hgnc_symbol) %>% as.data.frame() %>% rename("hgnc_symbol" = "Var1") %>% filter(Freq > 1) %>% inner_join(gene_map_f)
+```
+```{r}
+# data <- ReadMtx(mtx = expression_matrix, cells = barcodes, features = genes)
+data_dir <- "data/data_10x_format"
+list.files(data_dir) # Should show barcodes.tsv, features.tsv, and matrix.mtx
+data <- Read10X(data.dir = data_dir)
+```
+
+```{r}
+data_df <- as.data.frame(sparseToDenseMatrix(data))
+
+data_df$hgnc_symbol <- gene_map$hgnc_symbol
+
+head(data_df[,20318:20322])
+
+rm(data)
+
+```
+# Aggregate counts for duplicate symbols
+```{r}
+# Summarize
+data_df_duplicates = data_df[rownames(data_df) %in% duplicates$ensembl_gene_id, ]
+
+data_sum <- data_df_duplicates %>% group_by(hgnc_symbol) %>% summarize_at(colnames(data_df_duplicates)[!colnames(data_df_duplicates) %in% c("hgnc_symbol")], sum)
+  
+rm(data_df_duplicates)
+head(data_sum)
+```
+
+```{r}
+# Join summarized dataset
+rownames(data_df) <- c()
+rownames(data_sum) <- c()
+
+# discard genes without symbols
+data_df <- data_df %>% filter(hgnc_symbol %in% gene_map_f$hgnc_symbol)
+
+# Remove duplicated genes
+data_df <- data_df[!data_df$hgnc_symbol %in% duplicates$hgnc_symbol,]
+
+# Add sum of duplicated genes
+rownames(data_df) <- c()
+data_df <- data_df %>% rbind(data_sum) %>% column_to_rownames("hgnc_symbol")
+
+data = as.matrix(data_df)
+
+rm(data_df, data_sum)
+
+data = as(data, "dgCMatrix")
+
+```
+
+```{r}
+Seurat_object = CreateSeuratObject(counts = data, project = "NelsonEtAl2020")
+rm(data)
+
+Seurat_object@meta.data <- Seurat_object@meta.data %>% rownames_to_column("Assay") %>% left_join(design, by="Assay") %>% column_to_rownames("Assay")
+
+saveRDS(Seurat_object, file = paste0(source.output.dir, "/", Seurat_object_name, ".rds"))
+
+rm(design, study_metadata, ID_symbol_map)
+```
+
+```{r}
+Seurat_metadata <- Seurat_object@meta.data
+```
+
+# Inspecting dataset, QC plots
+```{r}
+# Check whether mitochondrial genes are present in the samples
+str_detect(rownames(Seurat_object), "^MT-") %>% sum()
+```
+
+```{r}
+# Compute the % of mitochondrial counts
+Seurat_object[["percent.mt"]] <- PercentageFeatureSet(Seurat_object, pattern = "^MT-") %>% mutate_all(~replace(., is.na(.), 0))
+
+```
+
+```{r}
+Idents(Seurat_object) <- "Sample.Characteristic.individual."
+
+# QC plots based on number of counts, features and % of mitochondrial genes
+VlnPlot(Seurat_object, features = c("nFeature_RNA"))
+VlnPlot(Seurat_object, features = c("nCount_RNA"))
+VlnPlot(Seurat_object, features = c("percent.mt"))
+
+FeatureScatter(Seurat_object, feature1 = "nCount_RNA", feature2 = "percent.mt")
+FeatureScatter(Seurat_object, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+Seurat_object@meta.data %>% select(nCount_RNA, nFeature_RNA, percent.mt) %>% summary()
+```
+```{r}
+Seurat_object
+Seurat_object_f <- subset(Seurat_object, subset = nFeature_RNA > 200 & percent.mt < 20 & nCount_RNA > 1000  & nCount_RNA < 40000)
+Seurat_object_f
+
+# QC plots based on number of counts, features and % of mitochondrial genes
+VlnPlot(Seurat_object_f, features = c("nFeature_RNA"))
+VlnPlot(Seurat_object_f, features = c("nCount_RNA"))
+VlnPlot(Seurat_object_f, features = c("percent.mt"))
+
+Seurat_object_f@meta.data %>% select(nCount_RNA, nFeature_RNA, percent.mt) %>% summary()
+```
+
+
+```{r}
+Seurat_object <- Seurat_object_f
+rm(Seurat_object_f)
+```
+
+# Edit metadata
+```{r}
+colnames(Seurat_object[[]])
+table(Seurat_object$orig.ident)
+table(Seurat_object$Sample.Characteristic.individual.)
+table(Seurat_object$Sample.Characteristic.sex.)
+table(Seurat_object$Sample.Characteristic.disease.)
+table(Seurat_object$Sample.Characteristic.tumor.grading.)
+table(Seurat_object$Sample.Characteristic.metastatic.site.)
+table(Seurat_object$Sample.Characteristic.cell.type.)
+```
+```{r}
+Seurat_object@meta.data <- Seurat_object[[]] %>% mutate(Project = orig.ident, Sample = Sample.Characteristic.individual.)
+```
+
+```{r}
+saveRDS(Seurat_object, file = paste0(source.output.dir, "/Seurat_object.rds"))
+
+# Seurat_object <- readRDS(file = paste0(source.output.dir, "/Seurat_object.rds"))
+
+```
+
+# Normalize and scale
+```{r Normalize and scale}
+median_library_size <- Seurat_object@assays$RNA %>% colSums() %>% median()
+
+# Normalize dataset
+Seurat_object_n <- NormalizeData(Seurat_object, normalization.method = "LogNormalize", scale.factor = median_library_size)
+
+# find highly variable features with a variance stabilizing transform
+Seurat_object_n <- FindVariableFeatures(Seurat_object_n, selection.method = "vst", nfeatures = 2000)
+
+VariableFeaturePlot(Seurat_object_n) %>% LabelPoints(points = head(VariableFeatures(Seurat_object_n), 30), repel = TRUE)
+
+# Scale dataset
+Seurat_object_n <- ScaleData(Seurat_object_n, features = rownames(Seurat_object_n))
+
+rm(Seurat_object)
+```
+# Perform PCA
+```{r Perform PCA}
+# Perform PCA
+n_pcs = 200
+
+Seurat_object_n <- RunPCA(Seurat_object_n, features = VariableFeatures(object = Seurat_object_n), npcs = n_pcs)
+
+# Plot PCA results
+Idents(Seurat_object_n) <- "Sample"
+VizDimLoadings(Seurat_object_n, dims = 1:2, reduction = "pca")
+DimPlot(Seurat_object_n, reduction = "pca")
+ElbowPlot(Seurat_object_n, ndims = n_pcs)
+
+DimHeatmap(Seurat_object_n, dims = 1:10, cells = 500, balanced = TRUE)
+
+# Check the total variance explained
+# On Seurat 3:
+pca <- Seurat_object_n[["pca"]]
+# Get the total variance of the scaled counts matrix:
+mat <- Seurat::GetAssayData(Seurat_object_n, assay = "RNA", slot = "scale.data")
+mat <- mat[rownames(mat) %in% VariableFeatures(Seurat_object_n), ]
+
+total_variance <- sum(matrixStats::rowVars(mat))
+
+eigValues = (pca@stdev)^2  ## EigenValues
+varExplained = eigValues / total_variance
+
+# varExplained
+cumvar <- cumsum(varExplained) %>% as.data.frame() 
+colnames(cumvar) <- c("cumvar")
+
+cumvar %>% ggplot(aes(x = c(1:n_pcs), y = cumvar)) + geom_point() + labs(x = "PC #", y = "Cumulative Variance")
+
+rm(mat, pca, cumvar)
+```
+
+# Cell cycle assignment
+```{r Cell cycle assignment}
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+# Assign and inspect cell cycle scores
+Seurat_object_n <- CellCycleScoring(Seurat_object_n, s.features = s.genes, g2m.features = g2m.genes)
+
+Seurat_object_n[[]] %>% select(S.Score, G2M.Score, Phase) %>% mutate_if(is.character, as.factor) %>% summary()
+```
+
+# Run UMAP and TSNE
+```{r Run UMAP and TSNE}
+# Run UMAP and project in 3D dimensions
+Seurat_object_n <- RunUMAP(Seurat_object_n, dims = 1:n_pcs, n.components = 3L)
+
+# Store this UMAP as a custom reduction
+Seurat_object_n[["umap3d"]] <- CreateDimReducObject(embeddings = Seurat_object_n@reductions$umap@cell.embeddings, key = "umap3d_", assay = DefaultAssay(Seurat_object_n))
+
+# Dimensionality reduction with UMAP and tSNE on PCs
+Seurat_object_n <- RunUMAP(Seurat_object_n, dims = 1:n_pcs)
+
+Seurat_object_n <- RunTSNE(Seurat_object_n, dims.use = 1:n_pcs, reduction.use = "pca", perplexity = 30)
+```
+
+# Clustering cells
+```{r Clustering cells}
+Seurat_object_n <- FindNeighbors(Seurat_object_n, features = VariableFeatures(object = Seurat_object_n))
+Seurat_object_n <- FindClusters(Seurat_object_n, resolution = 0.25)
+```
+
+# Visualization
+```{r Visualization}
+plot_features <- c("Sample", "orig.ident", "Phase", "annotation", "Cell_type", "Cell_subtype", "Simplified_celltype", "Cell_class", "seurat_clusters")
+
+plot_features <- plot_features[plot_features %in% colnames(Seurat_object_n[[]])]
+
+for (i in plot_features){
+  fig <- DimPlot(Seurat_object_n, reduction = "umap", group.by = i)
+  print(fig)
+}
+
+for (i in plot_features){
+  fig <- DimPlot(Seurat_object_n, reduction = "tsne", group.by = i)
+  print(fig)
+}
+
+rm(fig)
+```
+
+
+# Annotation for inferCNV
+```{r}
+annotation_metadata <- Seurat_object_n@meta.data %>% mutate(
+  Cell_type = ifelse(seurat_clusters %in% c(0,1,2,3), "tumor", "stromal"),
+  annotation = ifelse(Cell_type == "tumor", paste(Cell_type, Sample
+, sep = "_"), Cell_type))
+
+Seurat_object_n@meta.data <- Seurat_object_n@meta.data %>% mutate(
+  Cell_type = ifelse(seurat_clusters %in% c(0,1,2,3), "tumor", "stromal"),
+  annotation = ifelse(Cell_type == "tumor", paste(Cell_type, Sample.Characteristic.individual.
+, sep = "_"), Cell_type))
+
+table(Seurat_object_n@meta.data$annotation)
+
+
+# Write annotations file
+Seurat_object_n@meta.data %>% select(annotation) %>% rownames_to_column("sample_id") %>% write.table(file = "cellAnnotations.txt", sep = "\t", row.names = FALSE, col.names = FALSE)
+
+ref_group_names <- Seurat_object_n@meta.data %>% select(annotation) %>% unique() %>% filter(!str_detect(annotation, "tumor"))
+
+ref_group_names %>% write.csv2(file = "ref_group_names.csv", row.names = FALSE)
+```
+
+# Plotting signatures
+```{r}
+DimPlot(Seurat_object_n, reduction = "umap", group.by = "annotation")
+```
+
+# Plotting signatures
+```{r  Plotting signatures}
+# Plotting EMT signature # Supp table 5f
+EMT_signature <- c("EZH", "JUN", "VIM", "STEAP1", "SOX4", "MMP14", "SHH", "TIMP1", "ZEB1", "ZEB2", "SNAI2")
+
+EMT_signature <- EMT_signature[EMT_signature %in% rownames(Seurat_object_n@assays$RNA)]
+
+Idents(Seurat_object_n) <- "annotation"
+for(i in 1:length(EMT_signature)){
+p <- VlnPlot(Seurat_object_n, features = EMT_signature[i])
+print(p)
+rm(p)
+}
+```
+
+```{r}
+# Plotting Genes enriched in the "M" Population from Bakhoum et al Extended figure 6b 
+M_markers = c("ITGB5", "ITGB1", "ITGA5", "ITGA10", "IGFBP4", "FN1", "DSC2", "CXCL1","CTNNB1", "BMP4", "BCL2L1", "VIM", "TIMP1", "TGFBR2", "TGFBI", "TGFB1", "PPARG", "NUPR1", "MSN", "LMCD1", "LEF1", "JAG1")
+
+M_markers <- M_markers[M_markers %in% rownames(Seurat_object_n@assays$RNA)]
+
+Idents(Seurat_object_n) <- "annotation"
+for(i in 1:length(M_markers)){
+p <- VlnPlot(Seurat_object_n, features = M_markers[i])
+print(p)
+rm(p)
+}
+```
+
+```{r}
+# Plot CIN signature from Bakhoum et al 2018 (Supp. table 5), comparing CIN high and CIN low in bulk data
+CIN_signature <- c('PELI2','BMP2','SHH','TNS4','RAB3B','ROBO1','ARHGAP28','CHN2','CST1','F13A1','CPVL','SEMA6D','NHSL2','GTF2IP7','DPYSL3','PCDH7','KHDRBS3','TRAC','TMEM156', 'CST4','CD24','FGF5','NTN4')
+
+CIN_signature <- CIN_signature[CIN_signature %in% rownames(Seurat_object_n@assays$RNA)]
+
+Idents(Seurat_object_n) <- "annotation"
+for(i in 1:length(CIN_signature)){
+p <- VlnPlot(Seurat_object_n, features = CIN_signature[i])
+print(p)
+rm(p)
+}
+
+```
+
+```{r}
+# Creative Biolabs biomarkers 
+#Bhattacharya M, Barlow JJ. Tumor markers for ovarian cancer. Int Adv Surg Oncol. 1979;2:155-76. PMID: 95453.
+Ovarian_cancer_markers <- c("L1CAM", "CD24", "ADAM10", "BSG", "CLDN1", "CLDN3", "CLDN6", "CLDN10", "CLDN12", "CLDN17", "CLDN19", "MUC16", "BRCA1", "BRCA2", "APC", "FOLR1", "COL18A1", "CCND1", "MSLN", "WFDC2", "VEGFC", "AFP", "CGB3", "PZP")
+#	miR-21 miR-141	miR-200a	miR-200b	miR-200c	miR-203	miR-205  miR-241	hMLH1	hMSH2 p14ARF	p16INK4a	DAPKinase	 FLJ12988	miR-214	miR-199a	miR-140   miR-125b1	miR-92	miR-93	miR-126	miR-29a	miR-155   miR-127	miR-99b"
+
+Ovarian_cancer_markers <- Ovarian_cancer_markers[Ovarian_cancer_markers %in% rownames(Seurat_object_n@assays$RNA)]
+
+Idents(Seurat_object_n) <- "seurat_clusters"
+for(i in 1:length(Ovarian_cancer_markers)){
+p <- VlnPlot(Seurat_object_n, features = Ovarian_cancer_markers[i])
+print(p)
+rm(p)
+}
+```
+
+
+```{r}
+for(i in 1:length(Ovarian_cancer_markers)){
+p <- FeaturePlot(Seurat_object_n, features = Ovarian_cancer_markers[i])
+print(p)
+rm(p)
+}
+```
+
+```{r}
+#Novus biological, Muhl et al 2020., Agorku et aç. 2019
+Fibroblast_signature <- c("CD39", "PLAUR", "CD44", "ITGA2", "FAS", "LY6H", "ACTA2", "FAP", "S100A4", "SOS2", "PDGFRA", "PDGFRB", "CEACAM1", "CSPG4", "P4HB")
+
+Fibroblast_signature <- Fibroblast_signature[Fibroblast_signature %in% rownames(Seurat_object_n@assays$RNA)]
+
+Idents(Seurat_object_n) <- "seurat_clusters"
+for(i in 1:length(Fibroblast_signature)){
+p <- VlnPlot(Seurat_object_n, features = Fibroblast_signature[i])
+print(p)
+rm(p)
+}
+```
+
+
+```{r}
+for(i in 1:length(Fibroblast_signature)){
+p <- FeaturePlot(Seurat_object_n, features = Fibroblast_signature[i])
+print(p)
+rm(p)
+}
+```
+
+```{r}
+Epithelial_signature <- c("   Claudin-1 Claudin-3 Claudin-4 Claudin-6 Claudin-10a Claudin-10b Claudin-12 Claudin-17 Claudin-19 Cornulin Cytokeratin 8 Cytokeratin 14
+Cytokeratin 18 Cytokeratin 19 FoxJ1 FoxN1 KLF4 KLF5 KLF10 LRRC1/LANO TCF7L1/TCF3
+
+A33 ACE/CD143 ALCAM/CD166 Aminopeptidase B/RNPEP Aminopeptidase Inhibitors
+Aminopeptidase N/CD13 Amnionless B7-H2 B7-H3 CA125/MUC16 CA15-3/MUC-1 E-Cadherin
+CD1a CD1d CD1d1 CD46 CD74 CEACAM-1/CD66a CEACAM-3/CD66d CEACAM-4 CEACAM-5/CD66e
+CEACAM-6/CD66c CEACAM-7 Collagen I CTRP5/C1qTNF5 Cubilin DDR1 DDR1/DDR2 beta-Defensin 2
+beta-Defensin 3 alpha-Defensin 1 alpha-Defensin 5 Endorepellin/Perlecan EpCAM/TROP1
+Fas Ligand/TNFSF6 Gastrokine 1 HIN-1/SCGB3A1 Hyaluronan IGSF4C/SynCAM4 Integrin alpha 4/CD49d Integrin alpha 4 beta 1 Integrin alpha 4 beta 7/LPAM-1 JAM-A
+JAM-B/VE-JAM JAM-C L1CAM Laminin-1 MFG-E8 MSPR/Ron MUC-1 MUC-19 MUC-4 Nectin-1 Nectin-2/CD112 Nectin-3 Nectin-4 Nidogen-1/Entactin Occludin  PD-L1/B7-H1 PLET-1 PlGF
+Prostasin/Prss8 SLURP2 TfR (Transferrin R) UGRP1/SCGB3A2 ")
+```
+
+
+# Export
+```{r Export}
+if(export){
+saveRDS(Seurat_object_n, file = paste0(source.output.dir, "/Seurat_object_n.rds"))
+}
+
+# Seurat_object_n <- readRDS(file = paste0(source.output.dir, "/Seurat_object_n.rds"))
+```
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+# packageVersion("DESeq2")
+# packinfo <- installed.packages(fields = c("Package", "Version"))
+# packinfo[,c("Package", "Version")]
+# packinfo["graphics",c("Package", "Version")]
+
+```
+

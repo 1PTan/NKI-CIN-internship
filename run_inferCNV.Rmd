@@ -1,0 +1,208 @@
+---
+title: "Run inferCNV on Seurat object"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  cnv_output_dir: "output_cnv"
+  gene_features: "inferCNV_gene_features.csv"
+  folder: ""
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = TRUE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("Seurat", "patchwork", "ggrepel", "sparseMatrixStats", "tidyverse", "proxy", "plotly", "pheatmap", "gplots")
+# install.packages("BiocManager")
+#BiocManager::install("org.Hs.eg.db", "infercnv", "AneuFinder", "biomaRt")
+
+library(Seurat)
+library(patchwork)
+library(ggrepel)
+library(sparseMatrixStats)
+library(tidyverse)
+library(plotly)
+library(gplots)
+library(plotly)
+library(infercnv)
+library(AneuFinder)
+# library(biomaRt)
+
+source("function_inferCNV_karyotypeMeasures.R")
+
+select = dplyr::select
+rename = dplyr::rename
+
+set.seed(42)
+```
+
+# Setup
+```{r Setup}
+folder = params$folder
+
+# generate output dir path named data
+source.output.dir <- file.path(paste0(folder, "/", params$cnv_output_dir))
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+  dir.create(source.output.dir)
+} else{
+    print("Output folder already exists")
+  }
+
+```
+
+# Loading data
+```{r Loading data}
+Seurat_object <- readRDS(file = paste0(folder, "/output_sc/Seurat_object_n.rds"))
+
+Seurat_object[[]]$Project %>% unique()
+```
+
+# Get gene features
+```{r}
+gene.features <- read.csv2(file = params$gene_features)
+
+gene.features <- gene.features %>% column_to_rownames("gene_symbol")
+```
+
+# Get annotations
+```{r}
+# annot_scRNA <- Seurat_object@meta.data %>% select(annotation)
+annot_scRNA <- read.table(file = paste0(folder ,"/cellAnnotations.txt"))
+colnames(annot_scRNA) <- c("cell_id", "annotation")
+annot_scRNA <- annot_scRNA %>% column_to_rownames("cell_id")
+
+table(annot_scRNA$annotation)
+
+ref_group_names <- read.csv2(file = paste0(folder, "/ref_group_names.csv"))
+ref_group_names$annotation
+```
+```{r}
+count_matrix <- GetAssayData(Seurat_object, slot = "counts")
+
+# Check distribution of counts for genes with at least one count
+count_matrix[which(rowSums2(count_matrix) > 0),] %>% rowMeans() %>% summary()
+
+is.numeric(count_matrix)
+dim(count_matrix)
+```
+
+# Run inferCNV
+```{r Run inferCNV}
+infercnv_scRNA <- CreateInfercnvObject(
+  raw_counts_matrix = count_matrix, 
+  gene_order_file = gene.features, 
+  annotations_file = paste0(folder ,"/cellAnnotations.txt"),
+  ref_group_names=ref_group_names$annotation
+)
+
+rm(Seurat_object, gene.features, count_matrix) 
+
+infercnv_scRNA <- infercnv::run(infercnv_scRNA,
+cutoff=0.1,   ## 0.01, 0.025, 0.1
+out_dir=source.output.dir,
+cluster_by_groups=TRUE,
+denoise=TRUE,
+HMM=TRUE,
+HMM_type = "i6",
+num_threads=16,
+no_plot=TRUE,
+png_res = 300,
+diagnostics = TRUE,
+plot_probabilities = TRUE,
+analysis_mode= "subclusters"
+)
+
+infercnv_scRNA@gene_order$chr <- factor(as.character(infercnv_scRNA@gene_order$chr), levels=gtools::mixedsort(levels(infercnv_scRNA@gene_order$chr))) 
+
+levels(infercnv_scRNA@gene_order$chr)
+
+plot_cnv(infercnv_scRNA, output_filename = "infer_cnv", out_dir = source.output.dir, write_expr_matrix = TRUE, contig_cex = 3)
+```
+
+```{r}
+knitr::include_graphics(paste(source.output.dir, "infer_cnv.png", sep="/"))
+```
+
+```{r}
+cnv_object <- readRDS(file = paste0(source.output.dir, "/run.final.infercnv_obj"))
+```
+
+# Reorder plot
+```{r Reorder Plot}
+new_gene_order = data.frame()
+
+levels <- levels(cnv_object@gene_order$chr)[!levels(cnv_object@gene_order$chr) %in% c("MT", "Y")]
+
+for (chr_name in gtools::mixedsort(levels)) {
+  new_gene_order = rbind(new_gene_order, cnv_object@gene_order[which(cnv_object@gene_order[["chr"]] == chr_name) , , drop=FALSE])
+}
+
+names(new_gene_order) <- c("chr", "start", "stop")
+copy_infercnv_obj <- cnv_object
+copy_infercnv_obj@gene_order =  new_gene_order
+copy_infercnv_obj@expr.data = cnv_object@expr.data[rownames(new_gene_order), , drop=FALSE]
+
+plot_cnv(copy_infercnv_obj, output_filename = "infer_cnv_reorder", out_dir = source.output.dir, write_expr_matrix = TRUE, contig_cex = 3)
+```
+
+```{r}
+knitr::include_graphics(paste(source.output.dir, "infer_cnv_reorder.png", sep="/"))
+```
+# Karyotype Measures
+```{r Karyotype Measures}
+CNVexp <- as.data.frame(cnv_object@expr.data)
+
+annot_scRNA <- annot_scRNA %>% rownames_to_column("Sample") %>% filter(Sample %in% colnames(CNVexp)) %>% column_to_rownames("Sample")
+
+levels = (annot_scRNA %>% distinct())$annotation
+
+groups = list()
+
+for (i in 1:length(levels)){
+  groups[[levels[i]]] = levels[i] == annot_scRNA$annotation
+}
+
+CNV_metrics <- infercnv_karyotypeMeasures(expr.data = CNVexp, group_list = groups)
+
+CNV_metrics
+
+CNV_metrics %>% write_csv2(paste0(source.output.dir, "/karyotype_metrics.csv"))
+```
+
+```{r}
+CNV_metrics <- read_csv2(paste0(source.output.dir, "/karyotype_metrics.csv"))
+```
+
+```{r}
+CNV_metrics %>% column_to_rownames("group") %>% round(4) 
+
+CNV_metrics %>% ggplot(aes(x = heterogeneity_score, y = aneuploidy_score, col = group)) + geom_point() + geom_text_repel(aes(x = heterogeneity_score, y  = aneuploidy_score, label = group)) + theme(legend.position = "none") + xlim(0,  max(CNV_metrics$heterogeneity_score) + 0.1) + ylim(0, max(CNV_metrics$aneuploidy_score) + 0.01)
+
+ggsave(file = paste0(source.output.dir, "/karyotype_metrics.png"), width=6, height=5, dpi=300)
+```
+# Median Filtering
+```{r Median Filtering}
+infercnv_obj_medianfiltered = infercnv::apply_median_filtering(copy_infercnv_obj)
+
+plot_cnv(infercnv_obj_medianfiltered, output_filename = "infer_cnv_median_filtered", out_dir = source.output.dir, write_expr_matrix = TRUE, contig_cex = 3)
+
+knitr::include_graphics(paste(source.output.dir, "infer_cnv_median_filtered.png", sep="/"))
+```
+
+```{r}
+knitr::include_graphics(paste0(source.output.dir, "/karyotype_metrics.png"))
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+```
+

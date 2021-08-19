@@ -1,0 +1,192 @@
+---
+title: "Query gene features"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("tidyverse")
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+#BiocManager::install("org.Hs.eg.db", "biomaRt")
+
+library(tidyverse)
+library(biomaRt)
+select = dplyr::select
+rename = dplyr::rename
+
+set.seed(42)
+```
+
+# Human
+## Get all gene features
+```{r}
+# browseVignettes("biomaRt")  # biomart tutorial
+
+# Use biomart to get gene symbols and chromosome start and end positions
+mart <- biomaRt::useMart(biomart = "ENSEMBL_MART_ENSEMBL",
+                         dataset = "hsapiens_gene_ensembl")
+#  mirror = c("uswest", "useast", "asia", "www")
+
+biomaRt::listAttributes(mart)
+# biomaRt::listAttributes(mart) %>% filter(str_detect(name, "symbol"))
+# biomaRt::listEnsembl()
+# biomaRt::searchDatasets(mart = mart, pattern = "hsapiens")
+# biomaRt::listFilters(mart)
+
+gene_features <- getBM(
+  attributes=c("ensembl_gene_id", "ensembl_gene_id_version", "hgnc_symbol","entrezgene_id","chromosome_name","start_position","end_position"),
+  mart = mart)
+
+head(gene_features)
+gene_features %>% nrow()
+gene_features %>% select(hgnc_symbol) %>% n_distinct()
+```
+## Filter genes for inferCNV
+```{r}
+gene_features$chromosome_name %>% unique()
+
+# Filter for genes that have hgnc symbols and are in "main" chromosomes
+gene_features.f <- gene_features %>% select(hgnc_symbol, chromosome_name, start_position, end_position) %>% filter(chromosome_name %in% c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,"X", "Y", "MT")) %>% filter(hgnc_symbol != "") %>% unique()
+
+gene_features.f$chromosome_name %>% unique()
+
+nrow(gene_features.f)
+gene_features.f$hgnc_symbol %>% n_distinct()
+```
+InferCNV does not accept duplicated gene features. We are arbitrarily choosing one entry for genes with multiple entries that have (1) the first start position, then (2) the first end position
+
+## Choose entries for duplicate symbols
+```{r}
+# Genes with duplication
+duplicated_genes <- gene_features.f$hgnc_symbol[duplicated(gene_features.f$hgnc_symbol)]
+duplicated_genes
+
+# Determine entries with the first start and end positions
+gene_features.f <- gene_features.f %>% group_by(hgnc_symbol) %>% mutate(first_start = start_position == min(start_position), first_end = end_position == min(end_position))
+
+# Choose entries with the first start position
+duplicated <- gene_features.f %>% filter(hgnc_symbol %in% duplicated_genes)
+duplicated <- duplicated %>% filter(first_start)
+
+# Genes that still have duplication
+duplicated_genes <- duplicated$hgnc_symbol[duplicated(duplicated$hgnc_symbol)]
+duplicated_genes
+
+# From the remaining duplications, choose entries with the first end position
+duplicated <- duplicated %>% filter((hgnc_symbol %in% duplicated_genes & first_end) | !hgnc_symbol %in% duplicated_genes)
+
+# There should be no duplicated entries left
+duplicated_genes <- duplicated$hgnc_symbol[duplicated(duplicated$hgnc_symbol)]
+duplicated_genes
+
+# Choose genes without duplicates, then add the chosen entries
+gene_features.f <- gene_features.f %>% 
+  filter(!hgnc_symbol %in% duplicated$hgnc_symbol) %>% 
+  rbind(duplicated) %>% select(-c(first_start, first_end))
+
+colnames(gene_features.f) <- c("gene_symbol","chromosome_name","start_position","end_position")
+
+
+nrow(gene_features.f)
+```
+
+## Export
+```{r}
+gene_features %>% write_csv2("biomaRt_gene_features.csv")
+gene_features.f %>% write_csv2("inferCNV_gene_features.csv")
+
+rm(duplicated, gene_features, gene_features.f, mart)
+```
+
+# Mouse
+## Get all gene features
+```{r}
+# Use biomart to get gene symbols and chromosome start and end positions
+mart <- biomaRt::useMart(biomart = "ENSEMBL_MART_ENSEMBL",
+                         dataset = "mmusculus_gene_ensembl")
+#  mirror = c("uswest", "useast", "asia", "www")
+
+biomaRt::listAttributes(mart)
+biomaRt::listAttributes(mart) %>% filter(str_detect(name, "symbol"))
+# biomaRt::listEnsembl()
+# biomaRt::searchDatasets(mart = mart, pattern = "hsapiens")
+# biomaRt::listFilters(mart)
+
+gene_features <- getBM(
+  attributes=c("ensembl_gene_id", "ensembl_gene_id_version", "hgnc_symbol", "mgi_symbol", "entrezgene_id","chromosome_name","start_position","end_position"),
+  mart = mart)
+
+head(gene_features)
+gene_features %>% nrow()
+gene_features %>% select(hgnc_symbol) %>% n_distinct()
+```
+## Filter genes for inferCNV
+```{r}
+gene_features$chromosome_name %>% unique()
+
+# Filter for genes that have hgnc symbols and are in "main" chromosomes
+gene_features.f <- gene_features %>% select(mgi_symbol, chromosome_name, start_position, end_position) %>% filter(chromosome_name %in% c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,"X", "Y", "MT")) %>% filter(mgi_symbol != "") %>% unique()
+
+gene_features.f$chromosome_name %>% unique()
+
+nrow(gene_features.f)
+gene_features.f$mgi_symbol %>% n_distinct()
+```
+InferCNV does not accept duplicated gene features. We are arbitrarily choosing one entry for genes with multiple entries that have (1) the first start position, then (2) the first end position
+
+## Choose entries for duplicate symbols
+```{r}
+# Genes with duplication
+duplicated_genes <- gene_features.f$mgi_symbol[duplicated(gene_features.f$mgi_symbol)]
+duplicated_genes
+
+# Determine entries with the first start and end positions
+gene_features.f <- gene_features.f %>% group_by(mgi_symbol) %>% mutate(first_start = start_position == min(start_position), first_end = end_position == min(end_position))
+
+# Choose entries with the first start position
+duplicated <- gene_features.f %>% filter(mgi_symbol %in% duplicated_genes)
+duplicated <- duplicated %>% filter(first_start)
+
+# Genes that still have duplication
+duplicated_genes <- duplicated$mgi_symbol[duplicated(duplicated$mgi_symbol)]
+duplicated_genes
+
+# From the remaining duplications, choose entries with the first end position
+duplicated <- duplicated %>% filter((mgi_symbol %in% duplicated_genes & first_end) | !mgi_symbol %in% duplicated_genes)
+
+# There should be no duplicated entries left
+duplicated_genes <- duplicated$mgi_symbol[duplicated(duplicated$mgi_symbol)]
+duplicated_genes
+
+# Choose genes without duplicates, then add the chosen entries
+gene_features.f <- gene_features.f %>% 
+  filter(!mgi_symbol %in% duplicated$mgi_symbol) %>% 
+  rbind(duplicated) %>% select(-c(first_start, first_end))
+
+colnames(gene_features.f) <- c("gene_symbol","chromosome_name","start_position","end_position")
+
+nrow(gene_features.f)
+
+```
+
+## Export
+```{r}
+gene_features %>% write_csv2("biomaRt_gene_features_mouse.csv")
+gene_features.f %>% write_csv2("inferCNV_gene_features_mouse.csv")
+
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+```
+

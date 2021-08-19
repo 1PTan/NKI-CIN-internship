@@ -1,0 +1,267 @@
+---
+title: "Karaayvaz et al 2018 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  export: TRUE
+---
+# Loading Packages
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager", "Seurat", "sparseMatrixStats", "tidyverse")
+# install.packages()
+# BiocManager::install("DropletUtils", "org.Hs.eg.db", "recount3")
+library(Seurat)
+library(sparseMatrixStats)
+library(tidyverse)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(plotly)
+library(recount3)
+
+source(paste0(dirname(getwd()), "/Helper_functions.R"))
+
+select = dplyr::select
+
+```
+
+# Setup
+```{r Setup}
+export = params$export
+
+# generate output dir path named data
+source.output.dir <- file.path("output_sc")
+
+Seurat_object_name <- "scKaraayvaz"
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+} else{
+  print("Output folder already exists")
+}
+
+```
+# Recount3 data
+```{r}
+human_projects <- available_projects()
+
+proj_info <- subset(
+    human_projects,
+    project == "SRP157044" & project_type == "data_sources"
+)
+
+# 1 sample is missing, which makes it unable to create the summarized experiment
+rse_gene <- create_rse(proj_info)
+
+# assay(rse_gene, "counts") <- transform_counts(rse_gene)
+# 
+# assay(rse_gene)
+# colnames(assay(rse_gene))
+# 
+# rse_gene@colData$sra.experiment_title
+# rse_gene@colData$sra.experiment_acc
+
+rm(gse, human_projects, proj_info)
+```
+# Loading data
+```{r}
+gse=getGEO(filename="data/GSE118389_series_matrix.txt.gz")
+GEO_metadata <- gse@phenoData@data
+
+matrix_geo <- read.table("data/GSE118389_counts_rsem.txt")
+colnames(matrix_geo) %>% head()
+rownames(matrix_geo) %>% head(10)
+
+celltype_metadata <- read.table("data/cell_types_S9.txt")
+colnames(celltype_metadata) <- c("title", "Cell_type")
+
+data = as.matrix(matrix_geo)
+
+data = as(data, "dgCMatrix")
+
+data[1:5, 1:5]
+# gse2=getGEO(filename="data/GSE118390-GPL9052_series_matrix.txt.gz")
+# GEO_metadata2 <- gse2@phenoData@data
+# rm(gse2, GEO_metadata2)
+```
+
+```{r}
+Seurat_object = CreateSeuratObject(counts = data, project = "KaraayvazAl2018")
+rm(data)
+
+Seurat_object@meta.data <- Seurat_object@meta.data %>% rownames_to_column("title") %>% left_join(GEO_metadata %>% select(title, geo_accession, 'breast cancer subtype:ch1', 'patient:ch1', 'tissue:ch1') %>% rename("Sample" = 'patient:ch1'), by="title") %>% left_join(celltype_metadata, by = "title") %>% column_to_rownames("title")
+
+Seurat_object@meta.data %>% filter(is.na(Cell_type)) %>% nrow()
+
+Seurat_object@meta.data$Cell_type <- Seurat_object@meta.data$Cell_type %>% replace_na("Not_assigned")
+```
+# Inspecting dataset, QC plots
+```{r}
+# Check whether mitochondrial genes are present in the samples
+str_detect(rownames(Seurat_object), "^MT-") %>% sum()
+```
+
+```{r}
+# Compute the % of mitochondrial counts
+# Seurat_object[["percent.mt"]] <- PercentageFeatureSet(Seurat_object, pattern = "^MT-") %>% mutate_all(~replace(., is.na(.), 0))
+```
+
+```{r}
+Idents(Seurat_object) <- 'Sample'
+
+# QC plots based on number of counts, features and % of mitochondrial genes
+VlnPlot(Seurat_object, features = c("nFeature_RNA"))
+VlnPlot(Seurat_object, features = c("nCount_RNA"))
+# VlnPlot(Seurat_object, features = c("percent.mt"))
+
+# FeatureScatter(Seurat_object, feature1 = "nCount_RNA", feature2 = "percent.mt") 
+FeatureScatter(Seurat_object, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+Seurat_object@meta.data %>% select(nCount_RNA, nFeature_RNA) %>% summary()
+```
+
+# QC Filter dataset
+```{r}
+Seurat_object
+Seurat_object_f <- subset(Seurat_object, subset = nFeature_RNA > 200 & nCount_RNA > 1000  & nCount_RNA < 5000000)
+Seurat_object_f
+
+# QC plots based on number of counts, features and % of mitochondrial genes
+VlnPlot(Seurat_object_f, features = c("nFeature_RNA"))
+VlnPlot(Seurat_object_f, features = c("nCount_RNA"))
+
+Seurat_object_f@meta.data %>% select(nCount_RNA, nFeature_RNA, percent.mt) %>% summary()
+```
+
+
+```{r}
+Seurat_object <- Seurat_object_f
+rm(Seurat_object_f)
+```
+
+# Edit metadata
+```{r}
+colnames(Seurat_object[[]])
+table(Seurat_object$orig.ident)
+table(Seurat_object$Sample)
+table(Seurat_object$`tissue:ch1`)
+table(Seurat_object$Cell_type)
+```
+
+```{r}
+Seurat_object@meta.data <- Seurat_object[[]] %>% mutate(Project = "KaraayvazEtAl2018")
+```
+
+## Annotation for inferCNV
+```{r}
+annot_scRNA <- Seurat_object@meta.data %>% select(Cell_type, Sample) %>% mutate(
+  Cell_class = ifelse(str_detect(Cell_type, "epithelial"), "tumor", Cell_type),
+  annotation = ifelse(Cell_class == "tumor", paste0(Cell_class, "_", Sample), Cell_class))
+
+Seurat_object@meta.data$annotation <- annot_scRNA$annotation
+Seurat_object@meta.data$Cell_class <- annot_scRNA$Cell_class
+
+table(annot_scRNA$annotation)
+table(annot_scRNA$Cell_class)
+
+# Write annotations file
+Seurat_object@meta.data %>% select(annotation) %>% rownames_to_column("sample_id") %>% write.table(file = "cellAnnotations.txt", sep = "\t", row.names = FALSE, col.names = FALSE)
+
+ref_group_names <- Seurat_object@meta.data %>% select(annotation) %>% unique() %>% filter(!str_detect(annotation, "tumor"))
+
+ref_group_names %>% write.csv2(file = "ref_group_names.csv", row.names = FALSE)
+```
+
+
+
+# Celltype assignment
+```{r}
+# Supp table 7 - gene signatures for cell types
+# celltype_signatures <- read.csv2("data/Supp table 7.csv")
+# celltype_signatures$Marker %in% rownames(Seurat_object_n)
+# 
+# Idents(Seurat_object_n) <- "seurat_clusters"
+# for(i in 1:length(celltype_signatures$Marker)){
+# p <- VlnPlot(Seurat_object_n, features = celltype_signatures$Marker[i])
+# print(p)
+# rm(p)
+# }
+```
+
+```{r}
+# mat <- Seurat::GetAssayData(Seurat_object_n, assay = "RNA", slot = "counts")
+# mat <- mat[rownames(mat) %in% celltype_signatures$Marker, ]
+# mat <- as.matrix(mat)
+# 
+# celltypes <- as.data.frame(t(mat))
+# celltypes <- as.data.frame(celltypes > 0) %>% mutate_if(is.logical, as.numeric)
+# 
+# epithelial <- celltype_signatures %>% filter(type == "epithelial")
+# immune <- celltype_signatures %>% filter(type == "immune")
+# stroma <- celltype_signatures %>% filter(type == "stroma")
+# endothelial <- celltype_signatures %>% filter(type == "endothelial")
+# 
+# epithelial <- colnames(celltypes) %in% epithelial$Marker
+# immune <- colnames(celltypes) %in% immune$Marker
+# stroma <- colnames(celltypes) %in% stroma$Marker
+# endothelial <- colnames(celltypes) %in% endothelial$Marker
+# 
+# celltypes <- celltypes %>% mutate(
+#   endothelial_n = rowSums(celltypes[, endothelial]),
+#     epithelial_n = rowSums(celltypes[, epithelial]),  
+#   stroma_n = rowSums(celltypes[, stroma]),  
+#   immune_n = rowSums(celltypes[, immune])
+#   )
+# 
+# celltypes <- celltypes %>% mutate(
+#   endothelial = ifelse((endothelial_n > 0 & epithelial_n == 0 & stroma_n == 0 & immune_n == 0) | (endothelial_n > 2 & stroma_n < 2), TRUE, FALSE),
+#   stromal = ifelse((endothelial_n == 0 & epithelial_n == 0 & stroma_n > 0 & immune_n == 0) | (stroma_n > 2 & endothelial_n < 2), TRUE, FALSE),
+#    immune = ifelse((endothelial_n == 0 & epithelial_n == 0 & stroma_n == 0 & immune_n > 0), TRUE, FALSE),
+#   epithelial = ifelse(epithelial_n > 2, TRUE, FALSE)
+#   )
+# 
+# for (patient in Seurat_metadata$'patient:ch1' %>% unique()){
+#   print(patient)
+#   mask = Seurat_metadata$'patient:ch1' == patient
+#   print(colMedians(mat[, mask]))
+#   }
+# 
+# celltypes %>% mutate(
+#   cell_class = ifelse(
+#     (epithelial & !(endothelial | stromal | immune)),
+#     "epithelial", 
+#     ifelse((immune & !(endothelial | stromal | epithelial)),
+#            "immune", 
+#            ifelse((endothelial & !(immune | stromal | epithelial)),
+#            "endothelial", 
+#            ifelse((stromal & !(immune | endothelial | epithelial)),
+#            "stromal", "other"))))
+#   ) %>% select(cell_class) %>% table()
+
+```
+
+# Export
+```{r}
+saveRDS(Seurat_object, file = paste0(source.output.dir, "/Seurat_object.rds"))
+
+# Seurat_object <- readRDS(file = paste0(source.output.dir, "/Seurat_object.rds"))
+```
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+# packageVersion("DESeq2")
+# packinfo <- installed.packages(fields = c("Package", "Version"))
+# packinfo[,c("Package", "Version")]
+# packinfo["graphics",c("Package", "Version")]
+
+```
+

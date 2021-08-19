@@ -1,0 +1,87 @@
+---
+title: "Query gene features"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("tidyverse", "msigdbr")
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+#BiocManager::install("org.Hs.eg.db", "biomaRt")
+
+library(tidyverse)
+library(msigdbr)
+select = dplyr::select
+rename = dplyr::rename
+
+set.seed(42)
+```
+
+# Human
+## Load msigdb hallmarks gene set
+```{r Load msigdb hallmarks}
+all_gene_sets <- msigdbr("Homo sapiens")
+
+msigdb_hallmarks_set <- filter(all_gene_sets, gs_cat == "H") %>% select(gs_name, gene_symbol)
+
+rm(all_gene_sets)
+
+# Another option is loading files with gene sets
+# msigdb_hallmarks <- gmtPathways("data/h.all.v7.4.symbols.gmt")
+# msigdb_hallmarks %>% head() %>% lapply(head)
+
+```
+
+## Export
+```{r}
+msigdb_hallmarks_set %>% write_csv2("msigdb_hallmarks_set.csv")
+```
+
+# Mouse
+## Load msigdb hallmarks gene set
+```{r}
+all_gene_sets_mouse <- msigdbr("Mus musculus")
+
+msigdb_hallmarks_set_mouse <- filter(all_gene_sets_mouse, gs_cat == "H") %>% select(gs_name, gene_symbol)
+
+rm(all_gene_sets_mouse)
+# Another option is loading files with gene sets
+# msigdb_hallmarks <- gmtPathways("data/h.all.v7.4.symbols.gmt")
+# msigdb_hallmarks %>% head() %>% lapply(head)
+
+
+```
+
+## Export
+```{r}
+msigdb_hallmarks_set_mouse %>% write_csv2("msigdb_hallmarks_set_mouse.csv")
+```
+
+# Hallmark Names
+```{r}
+names_hallmarks <- msigdb_hallmarks_set$gs_name %>% unique() %>% as.data.frame()
+colnames(names_hallmarks) <- c("pathway")
+
+name_list <- c("Adipogenesis", "Allograft Rejection", "Androgen Response",  "Angiogenesis", "Apical Junction", "Apical Surface", "Apoptosis", "Bile Acid Metabolism", "Cholesterol Homeostasis", "Coagulation", "Complement",  "DNA Repair", "E2F Targets", "EMT", "Early Estrogen Response", "Late Estrogen Response", "Fatty Acid Metabolism", "G2M Checkpoint", "Glycolysis", "Hedgehog Signaling", "HEME Metabolism", "Hypoxia", "IL2-STAT5 Signaling", "IL6-JAK-STAT3 Signaling", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "KRAS Signaling Down", "KRAS Signaling Up", "Mitotic Spindle", "MTORC1 Signaling", "MYC Targets V1", "MYC Targets V2", "Myogenesis", "Notch Signaling", "OxPhos", "p53 Pathway", "Pancreas B-cells", "Peroxisome", "PI3K-AKT-MTOR Signaling", "Protein Secretion", "ROS", "Spermatogenesis", "TGF-B Signaling", "TNF-a Signaling via NKFB", "Unfolded Protein Response", "Uv Response Dn", "Uv Response Up", "Wnt B-Catenin Signaling", "Xenobiotic Metabolism")
+
+names_hallmarks$name <- name_list
+
+names_hallmarks
+
+names_hallmarks %>% write.csv2(file = "names_hallmarks.csv", row.names = FALSE)
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+```
+
