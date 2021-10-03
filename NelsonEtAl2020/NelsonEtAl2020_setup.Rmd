@@ -102,7 +102,7 @@ data_df <- as.data.frame(sparseToDenseMatrix(data))
 
 data_df$hgnc_symbol <- gene_map$hgnc_symbol
 
-head(data_df[,20318:20322])
+data_df[1:5,20318:20322]
 
 rm(data)
 

@@ -1,0 +1,174 @@
+---
+title: "Nelson et al 2020 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("Seurat", "patchwork", "ggrepel", "sparseMatrixStats", "tidyverse", "proxy", "plotly", "pheatmap", "gplots")
+
+library(tidyverse)
+library(ggrepel)
+
+select = dplyr::select
+rename = dplyr::rename
+
+set.seed(42)
+```
+
+# Loading data
+```{r}
+# generate output dir path named data
+source.output.dir <- file.path("output_cnv")
+
+CNV_metrics <- read_csv2(paste0(source.output.dir, "/karyotype_metrics.csv"))
+
+CNV_metrics_medf <- read_csv2(paste0(source.output.dir, "/karyotype_metrics_medf.csv"))
+
+
+knitr::include_graphics(paste0(source.output.dir, "/karyotype_metrics.png"))
+knitr::include_graphics(paste0(source.output.dir, "/karyotype_metrics_medf.png"))
+
+knitr::include_graphics(paste0(source.output.dir, "/infer_cnv_reorder.png"))
+knitr::include_graphics(paste0(source.output.dir, "/infer_cnv_median_filtered.png"))
+
+```
+
+```{r}
+CNV_metrics %>% column_to_rownames("group") %>% round(4) 
+
+CNV_metrics %>% ggplot(aes(x = heterogeneity_score, y = aneuploidy_score, col = group)) + geom_point() + geom_text_repel(aes(x = heterogeneity_score, y  = aneuploidy_score, label = group)) + theme(legend.position = "none")
+```
+# Compare with paper scores
+```{r}
+NelsonEtAl_scores <- read.csv2("data/NelsonEtAl2020_Fig6bdata.csv")
+
+CNV_metrics_c <- CNV_metrics %>% mutate(OCM = c("38b", "Stromal", "59", "74-1", "79")) %>% left_join(NelsonEtAl_scores, by = "OCM")
+
+CNV_metrics_medf_c <- CNV_metrics_medf %>% mutate(OCM = c("38b", "Stromal", "59", "74-1", "79")) %>% left_join(NelsonEtAl_scores, by = "OCM")
+```
+
+```{r}
+CNV_metrics_c %>% ggplot(aes(x = Heterogeneity.score, y  = Aneuploidy.score)) + geom_point() + geom_text_repel(aes(x = Heterogeneity.score, y  = Aneuploidy.score, label = OCM)) + labs(x = "Aneufinder Heterogeneity Score", y = "Aneufinder Aneuploidy Score")
+ggsave(file = file.path(source.output.dir, "Nelson_orig.png"), width=5, height=3, dpi=300)
+
+CNV_metrics_c %>% ggplot(aes(x = heterogeneity_score, y  = Heterogeneity.score, col = Aneuploidy.score)) + geom_point() + geom_text_repel(aes(x = heterogeneity_score, y  = Heterogeneity.score, label = OCM)) + labs(x = "InferCNV Heterogeneity Score", y = "Aneufinder Heterogeneity Score")
+ggsave(file = file.path(source.output.dir, "Nelson_orig.het.png"), width=5, height=3, dpi=300)
+
+CNV_metrics_c %>% ggplot(aes(x = aneuploidy_score, y  = Aneuploidy.score, col = Heterogeneity.score)) + geom_point() + geom_text_repel(aes(x = aneuploidy_score, y  = Aneuploidy.score, label = OCM)) + labs(x = "InferCNV Aneuploidy Score", y = "Aneufinder Aneuploidy Score")
+ggsave(file = file.path(source.output.dir, "Nelson_orig.aneu.png"), width=5, height=3, dpi=300)
+```
+
+```{r}
+knitr::include_graphics(file.path(source.output.dir, "karyotype_metrics.png"))
+knitr::include_graphics(file.path(source.output.dir, "karyotype_metrics_medf.png"))
+
+knitr::include_graphics(file.path(source.output.dir, "Nelson_orig.png"))
+knitr::include_graphics(file.path(source.output.dir, "Nelson_orig.het.png"))
+knitr::include_graphics(file.path(source.output.dir, "Nelson_orig.aneu.png"))
+
+```
+
+
+# Assign "CIN_high and low" groups
+```{r}
+group_assignment <- CNV_metrics_c %>% filter(startsWith(group, "tumor")) %>% mutate(CIN_status_alt = ifelse(heterogeneity_score > 0.4 & aneuploidy_score > 0.04, "CIN_high", "CIN_low"), CIN_status = ifelse(Heterogeneity.score > 0.22 & Aneuploidy.score > 1, "CIN_high", "CIN_low"))
+
+group_assignment %>% ggplot(aes(x = heterogeneity_score, y = aneuploidy_score, col = CIN_status_alt)) + geom_point() + geom_text_repel(aes(x = heterogeneity_score, y  = aneuploidy_score, label = group), show.legend=FALSE) + xlim(0, max(CNV_metrics_c$heterogeneity_score) + 0.1) + ylim(0, max(CNV_metrics_c$aneuploidy_score) + 0.01)
+ggsave(file = paste0(source.output.dir, "/CNV_metrics_altassignment.png"), width=6, height=4, dpi=300)
+
+group_assignment %>% ggplot(aes(x = Heterogeneity.score, y = Aneuploidy.score, col = CIN_status)) + geom_point() + geom_text_repel(aes(x = Heterogeneity.score, y  = Aneuploidy.score, label = group), show.legend=FALSE) + xlim(0, max(CNV_metrics_c$Heterogeneity.score) + 0.1) + ylim(-0.25, max(CNV_metrics_c$Aneuploidy.score) + 0.01)
+ggsave(file = paste0(source.output.dir, "/CNV_metrics_assignment.png"), width=6, height=4, dpi=300)
+
+group_assignment %>% write_csv2(paste0(source.output.dir, "/CNV_metrics_CIN_assignment.csv"))
+```
+
+```{r}
+table(group_assignment$CIN_status, group_assignment$CIN_status_alt)
+```
+
+```{r}
+knitr::include_graphics(file.path(source.output.dir, "Nelson_orig.png"))
+
+knitr::include_graphics(file.path(source.output.dir, "Nelson_orig.het.png"))
+knitr::include_graphics(file.path(source.output.dir, "Nelson_orig.aneu.png"))
+
+knitr::include_graphics(file.path(source.output.dir, "CNV_metrics_assignment.png"))
+knitr::include_graphics(file.path(source.output.dir, "CNV_metrics_altassignment.png"))
+
+```
+
+# medf - Assign "CIN_high and low" groups
+```{r}
+group_assignment_medf <- CNV_metrics_medf_c %>% filter(startsWith(group, "tumor")) %>% mutate(CIN_status_alt = ifelse(heterogeneity_score > 0.015 & aneuploidy_score > 0.028, "CIN_high", "CIN_low"), CIN_status = ifelse(Heterogeneity.score > 0.22 & Aneuploidy.score > 1, "CIN_high", "CIN_low"))
+
+
+group_assignment_medf %>% 
+  ggplot(aes(x = heterogeneity_score, y = aneuploidy_score, col = CIN_status)) + 
+  geom_point() + 
+  geom_text_repel(aes(x = heterogeneity_score, y  = aneuploidy_score, label = group), show.legend=FALSE) + 
+  xlim(0,  max(CNV_metrics_medf$heterogeneity_score) + 0.01) + 
+  ylim(0, max(CNV_metrics_medf$aneuploidy_score) + 0.005) + 
+  labs(x = "Heterogeneity Score", y = "Aneuploidy Score")
+
+ ggsave(file = file.path(source.output.dir, "CNV_metrics_assignment_medf.png"), width=4, height=2, dpi=300)
+
+
+group_assignment_medf %>% 
+  ggplot(aes(x = heterogeneity_score, y = aneuploidy_score, col = CIN_status_alt)) + 
+  geom_point() + 
+  geom_text_repel(aes(x = heterogeneity_score, y  = aneuploidy_score, label = group), show.legend=FALSE) + 
+  xlim(0,  max(CNV_metrics_medf$heterogeneity_score) + 0.01) + 
+  ylim(0, max(CNV_metrics_medf$aneuploidy_score) + 0.005) + 
+  labs(x = "Heterogeneity Score", y = "Aneuploidy Score")
+
+ 
+group_assignment_medf %>% write_csv2(file.path(source.output.dir, "CNV_metrics_CIN_assignment_medf.csv"))
+
+knitr::include_graphics(file.path(source.output.dir, "CNV_metrics_assignment_medf.png"))
+
+```
+
+```{r}
+group_assignment_c <- group_assignment %>% left_join(group_assignment_medf, by = c("group"), suffix = c("", ".medf"))
+
+table(group_assignment_c$CIN_status, group_assignment_c$CIN_status.medf)
+
+group_assignment_c %>% 
+  ggplot(aes(x = aneuploidy_score, y = aneuploidy_score.medf, col = group)) + 
+  geom_point() + 
+  geom_text_repel(aes(x = aneuploidy_score, y  = aneuploidy_score.medf, label = group), show.legend=FALSE)
+
+group_assignment_c %>% 
+  ggplot(aes(x = heterogeneity_score, y = heterogeneity_score.medf, col = group)) + 
+  geom_point() + 
+  geom_text_repel(aes(x = heterogeneity_score, y  = heterogeneity_score.medf, label = group), show.legend=FALSE)
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+```
+
+```{r}
+HMM_region_predictions <- read.table(file.path(source.output.dir, "HMM_CNV_predictions.HMMi6.rand_trees.hmm_mode-subclusters.Pnorm_0.5.pred_cnv_regions.dat"), header = TRUE)
+
+HMM_predictions <- read.table(file.path(source.output.dir, "HMM_CNV_predictions.HMMi6.rand_trees.hmm_mode-subclusters.Pnorm_0.5.pred_cnv_genes.dat"), header = TRUE)
+
+HMM_cell_groupings <- read.table(file.path(source.output.dir, "17_HMM_predHMMi6.rand_trees.hmm_mode-subclusters.cell_groupings"), header = TRUE)
+```
+
+```{r}
+HMM_cell_groupings %>% select(cell_group_name) %>% unique() %>% nrow()
+HMM_cell_groupings %>% group_by(cell_group_name) %>% summarize(n_cells = n())
+```
+

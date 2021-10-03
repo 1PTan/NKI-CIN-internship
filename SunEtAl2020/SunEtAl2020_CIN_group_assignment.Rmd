@@ -1,0 +1,102 @@
+---
+title: "CIN group assignment Sun et al 2020 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  export: TRUE
+  output_dir: "output_cnv"
+---
+# Loading Packages
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager", "Seurat", "sparseMatrixStats", "tidyverse")
+library(tidyverse)
+library(ggrepel)
+
+source(file.path(dirname(getwd()), "Helper_functions.R"))
+
+select = dplyr::select
+```
+
+```{r}
+source.output.dir <- file.path(params$output_dir)
+
+CNV_metrics <- read_csv2(paste0(source.output.dir, "/karyotype_metrics.csv"))
+
+CNV_metrics_medf <- read_csv2(paste0(source.output.dir, "/karyotype_metrics_medf.csv"))
+
+
+knitr::include_graphics(paste0(source.output.dir, "/karyotype_metrics.png"))
+knitr::include_graphics(paste0(source.output.dir, "/karyotype_metrics_medf.png"))
+
+knitr::include_graphics(paste0(source.output.dir, "/infer_cnv_reorder.png"))
+knitr::include_graphics(paste0(source.output.dir, "/infer_cnv_median_filtered.png"))
+
+```
+# Assign "CIN_high and low" groups
+```{r}
+group_assignment <- CNV_metrics %>% filter(str_detect(group, "tumor")) %>% mutate(CIN_status = ifelse(heterogeneity_score > 0.25 & aneuploidy_score > 0.021, "CIN_high", "CIN_low"))
+
+group_assignment %>% ggplot(aes(x = heterogeneity_score, y = aneuploidy_score, col = CIN_status)) + geom_point() + geom_text_repel(aes(x = heterogeneity_score, y  = aneuploidy_score, label = group), show.legend=FALSE) + xlim(0,  max(CNV_metrics$heterogeneity_score) + 0.05) + ylim(0, max(CNV_metrics$aneuploidy_score) + 0.01)
+ 
+ggsave(file = file.path(source.output.dir, "CNV_metrics_assignment.png"), width=6, height=4, dpi=300)
+ 
+group_assignment %>% write_csv2(file.path(source.output.dir, "CNV_metrics_CIN_assignment.csv"))
+```
+
+```{r}
+knitr::include_graphics(file.path(source.output.dir, "CNV_metrics_assignment.png"))
+```
+# medf - Assign "CIN_high and low" groups
+```{r}
+group_assignment_medf <- CNV_metrics_medf %>% filter(str_detect(group, "tumor")) %>% mutate(CIN_status = ifelse(heterogeneity_score > 0.1 | aneuploidy_score > 0.012, "CIN_high", "CIN_low"))
+
+group_assignment_medf %>% 
+  ggplot(aes(x = heterogeneity_score, y = aneuploidy_score, col = CIN_status)) + 
+  geom_point() + 
+  geom_text_repel(aes(x = heterogeneity_score, y  = aneuploidy_score, label = group), show.legend=FALSE) + 
+  xlim(0,  max(CNV_metrics_medf$heterogeneity_score) + 0.01) + 
+  ylim(0, max(CNV_metrics_medf$aneuploidy_score) + 0.005) + 
+  labs(x = "Heterogeneity Score", y = "Aneuploidy Score")
+ 
+ggsave(file = file.path(source.output.dir, "CNV_metrics_assignment_medf.png"), width=4, height=2, dpi=300)
+ 
+group_assignment_medf %>% write_csv2(file.path(source.output.dir, "CNV_metrics_CIN_assignment_medf.csv"))
+
+knitr::include_graphics(file.path(source.output.dir, "CNV_metrics_assignment_medf.png"))
+
+```
+```{r}
+group_assignment_c <- group_assignment %>% left_join(group_assignment_medf, by = c("group"), suffix = c("", ".medf"))
+
+table(group_assignment_c$CIN_status, group_assignment_c$CIN_status.medf)
+
+group_assignment_c %>% 
+  ggplot(aes(x = aneuploidy_score, y = aneuploidy_score.medf, col = group)) + 
+  geom_point() + 
+  geom_text_repel(aes(x = aneuploidy_score, y  = aneuploidy_score.medf, label = group), show.legend=FALSE)
+
+group_assignment_c %>% 
+  ggplot(aes(x = heterogeneity_score, y = heterogeneity_score.medf, col = group)) + 
+  geom_point() + 
+  geom_text_repel(aes(x = heterogeneity_score, y  = heterogeneity_score.medf, label = group), show.legend=FALSE)
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+# packageVersion("DESeq2")
+# packinfo <- installed.packages(fields = c("Package", "Version"))
+# packinfo[,c("Package", "Version")]
+# packinfo["graphics",c("Package", "Version")]
+
+```
+

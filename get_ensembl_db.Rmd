@@ -16,14 +16,16 @@ knitr::opts_chunk$set(
 
 # install.packages("tidyverse")
 library(tidyverse)
+
+#BiocManager::install("EnsDb.Hsapiens.v86")
+library(EnsDb.Hsapiens.v86)
+
 ```
 
 ```{r}
 # Reference vignette tutorial
 # https://www.bioconductor.org/packages/devel/bioc/vignettes/ensembldb/inst/doc/ensembldb.html
 
-#BiocManager::install("EnsDb.Hsapiens.v86")
-library(EnsDb.Hsapiens.v86)
 edb <- EnsDb.Hsapiens.v86
 
 organism(edb)
@@ -31,6 +33,7 @@ supportedFilters(edb)
 listTxbiotypes(edb)
 listTables(edb)
 ```
+
 ```{r}
 ensembl_db <- genes(edb, return.type = "DataFrame")
 ensembl_db <- ensembl_db %>% as.data.frame()
@@ -51,4 +54,9 @@ ensembl_db_c %>%  write_csv("EnsDb.Hsapiens.v86.csv")
 #edb_rRNA <- genes(edb_rRNA, return.type = "DataFrame")
 #rRNA_df <- edb_rRNA %>% as.data.frame()
 #rRNA_df %>% write_csv("rRNA_df.csv")
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
 ```

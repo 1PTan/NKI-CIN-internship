@@ -69,7 +69,8 @@ KUL_data <- read.table("data/GSE144735_processed_KUL3_CRC_10X_raw_UMI_count_matr
 KUL_metadata <- read.table("data/GSE144735_processed_KUL3_CRC_10X_annotation.txt", sep = "\t", header = TRUE)
 KUL_metadata <- KUL_metadata %>% mutate_if(is.character, as.factor)
 
-head(KUL_data, 20)
+KUL_data[1:5, 1:20]
+
 row.names(KUL_data) <- c()
 KUL_data <- KUL_data %>% column_to_rownames("Index")
 
@@ -78,7 +79,14 @@ rm(KUL_data)
 
 data = as(data, "dgCMatrix")
 scLee_KUL = CreateSeuratObject(counts = data, project = "LeeEtAl2020_KUL")
-rm(data)
+# rm(data)
+
+# Replace dashes with dots, as Seurat does
+rownames(scLee_KUL@meta.data) %in% KUL_metadata$Index %>% sum()
+rownames(scLee_KUL@meta.data) %in% (KUL_metadata$Index %>% str_replace("-", ".")) %>% sum()
+
+KUL_metadata <- KUL_metadata %>% mutate(orig_index = Index)
+KUL_metadata$Index <- KUL_metadata$Index %>% str_replace("-", ".")
 
 scLee_KUL@meta.data <- scLee_KUL@meta.data %>% rownames_to_column("Index") %>% left_join(KUL_metadata, by = "Index") %>% column_to_rownames("Index")
 
@@ -92,7 +100,7 @@ SMC_data <- read.table("data/GSE132465_GEO_processed_CRC_10X_raw_UMI_count_matri
 SMC_metadata <- read.table("data/GSE132465_GEO_processed_CRC_10X_cell_annotation.txt", sep = "\t", header = TRUE)
 SMC_metadata <- SMC_metadata %>% mutate_if(is.character, as.factor)
 
-head(SMC_data, 20)
+SMC_data [1:5, 1:20]
 row.names(SMC_data) <- c()
 
 SMC_data <- SMC_data %>% column_to_rownames("Index")
@@ -136,7 +144,7 @@ table(SMC_metadata$Patient, SMC_metadata$Cell_subtype)
 
 ```{r}
 Seurat_object <- merge(scLee_KUL, y = scLee_SMC, project = "LeeEtAl2020")
-rm(scLee_KUL, scLee_SMC)
+# rm(scLee_KUL, scLee_SMC)
 
 saveRDS(Seurat_object, file = paste0(source.output.dir, "/", Seurat_object_name, "_c.rds"))
 
@@ -223,9 +231,9 @@ prop.table(table(Seurat_object$Simplified_celltype, Seurat_object$Patient), marg
 
 # Export
 ```{r}
-saveRDS(Seurat_object, file = paste0(source.output.dir, "/Seurat_object.rds"))
+saveRDS(Seurat_object, file = file.path(source.output.dir, "Seurat_object.rds"))
 
-# Seurat_object <- readRDS(file = paste0(source.output.dir, "/Seurat_object.rds"))
+# Seurat_object <- readRDS(file = file.path(source.output.dir, "Seurat_object.rds"))
 ```
 
 # sessionInfo - Package Versions

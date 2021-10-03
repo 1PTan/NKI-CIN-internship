@@ -1,0 +1,619 @@
+---
+title: "Generate Plots for Final Figures"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  export: TRUE
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+#BiocManager::install("fgsea", "GO.db", "GOstats", "org.Hs.eg.db", "glmGamPoi", "DESeq2", "GGally")
+
+# install.packages("Seurat", "patchwork", "ggrepel", "sparseMatrixStats", "msigdbr", "tidyverse", "proxy", "plotly", "pheatmap", "gplots")
+library(Seurat)
+library(patchwork)
+library(ggrepel)
+library(sparseMatrixStats)
+library(msigdbr)
+library(org.Hs.eg.db)
+library(tidyverse)
+library(proxy)
+library(plotly)
+library(pheatmap)
+library(gplots)
+library(GGally)
+library(cowplot)
+library(DESeq2)
+source("Helper_functions.R")
+
+set.seed(42)
+select = dplyr::select
+rename = dplyr::rename
+```
+
+# Setup
+```{r}
+export = params$export
+
+# generate output dir path named data
+source.output.dir <- file.path("final_figures")
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+} else{
+  print("Output folder already exists")
+}
+```
+
+# Load msigdb hallmarks gene set
+```{r Load msigdb hallmarks}
+msigdb_hallmarks_set <- read.csv2(file = "msigdb_hallmarks_set.csv")
+msigdb_hallmarks_set <- split(msigdb_hallmarks_set$gene_symbol, msigdb_hallmarks_set$gs_name)
+
+msigdb_hallmarks_names <- read.csv2(file = "names_hallmarks.csv")
+```
+
+# Load data
+```{r}
+# Fig 1
+dds <- readRDS(file = file.path("BakhoumEtAl2018", "output_bulkPE75bp_sc5Samples", "dds.rds"))
+
+df.deseq.results.shrunk <- read_csv2(file = file.path("BakhoumEtAl2018", "output_bulkPE75bp_sc5Samples", "bulk_transcriptomics_deseq_shrunkLFC.csv"))
+
+fgseaRes.shrunk <- read.csv2(file = file.path("BakhoumEtAl2018", "output_bulkPE75bp_sc5Samples","bulk_fgsea_shrunkfc_CIN_highlow.csv"))
+
+Bulk_gsea <- read.csv2(file.path("BakhoumEtAl2018", "data", "Supp_table6.csv"))
+
+fgseaRes.noLFC.stat <- read.csv2(file = file.path("BakhoumEtAl2018", "output_bulkPE75bp_sc3Samples","bulk_fgsea_Zstat_CIN_highlow_3samples.csv"))
+
+# Fig 2
+Seurat_object <- readRDS(file = file.path("BakhoumEtAl2018", "output_sc", "Seurat_object_n.rds"))
+
+CIN.DE.bulk_noLFC <- read_csv2(file.path("BakhoumEtAl2018", "output_bulkPE75bp_sc3Samples", "bulk_transcriptomics_deseq_noLFC.csv"))
+
+CIN.DE.bulk_stat_leadingedge <-read_csv2(file.path("BakhoumEtAl2018", "output_bulkPE75bp_sc3Samples", "fgsea_bulk_deseqstat_leadingedge_3samples.csv"))
+
+df.deseq.results.pseudoWald <- read.csv2(file.path("BakhoumEtAl2018", "output_DE","df.deseq.results.pseudobulkWald.csv"))
+
+sc_means <- read_csv2(file = file.path("BakhoumEtAl2018", "output_DE", "sc_means.csv"))
+
+scExpression_percentages <- read.csv2(file.path("BakhoumEtAl2018", "output_sc_x_sc3bulk", "scExpression_percentages.csv"))
+
+CIN.DE.c_noLFC <- CIN.DE.bulk_noLFC %>% inner_join(df.deseq.results.pseudoWald, by = "gene", suffix = c(".bulk", ".sc")) %>% mutate(bulk_sign = sign(log2FoldChange.bulk), sc_sign = sign(log2FoldChange.sc)) %>% left_join(sc_means) %>% mutate(bulk_leadingedge = gene %in% CIN.DE.bulk_stat_leadingedge$leadingedge_gene) %>% left_join(scExpression_percentages) %>% unique()
+
+CIN_signature <- c('PELI2','BMP2','SHH','TNS4','RAB3B','ROBO1','ARHGAP28','CHN2','CST1','F13A1','CPVL','SEMA6D','NHSL2','GTF2IP7','DPYSL3','PCDH7','KHDRBS3','TRAC','TMEM156', 'CST4','CD24','FGF5','NTN4')
+
+fgseaRes.deseqstat <- read.csv2(file = file.path("BakhoumEtAl2018", "output_DE", "pseudobulk_fgsea_deseqstat.csv"))
+```
+
+```{r}
+# Figs 3,4,5
+datatype = "pseudobulk_fgsea_deseqstat.csv"
+
+# Read Bakhoum data to format dataframes
+BakhoumEtAl2018 <- read_csv2(file.path("BakhoumEtAl2018", "output_DE", datatype))
+
+BakhoumEtAl2018metrics <- read_csv2(file.path("BakhoumEtAl2018", "output_cnv", "karyotype_metrics.csv")) %>% mutate(dataset = "BakhoumEtAl2018")
+
+CIN_assignment <- read_csv2(file.path("BakhoumEtAl2018", "output_cnv", "CNV_metrics_CIN_assignment.csv")) %>% mutate(dataset = "BakhoumEtAl2018")
+
+BakhoumEtAl2018metrics <- BakhoumEtAl2018metrics %>% left_join(CIN_assignment %>% select(group, CIN_status, dataset))
+
+# Format dataframes according to Bakhoum df
+fgsea_data <- setNames(data.frame(matrix(ncol = ncol(BakhoumEtAl2018) + 1, nrow = 0)), c(colnames(BakhoumEtAl2018), "dataset"))
+
+karyotype_scores <- setNames(data.frame(matrix(ncol = ncol(BakhoumEtAl2018metrics), nrow = 0)), colnames(BakhoumEtAl2018metrics))
+  
+rm(BakhoumEtAl2018, BakhoumEtAl2018metrics)
+
+# Load each dataset, appending data
+dataset_list <- c("LeeEtAl2020", "NelsonEtAl2020", "BakhoumEtAl2018", "ChungEtAl2017", "DarmanisEtAl2017", "GiustacchiniEtAl2017", "KaraayvazEtAl2018", "SunEtAl2020", "TijhuisEtAl202X", "TiroshEtAl2016", "PuramEtAl2017")
+
+for(dataset_name in dataset_list){
+  print(dataset_name)
+  fgsea <- read_csv2(file.path(dataset_name, "output_DE", datatype)) %>% mutate(dataset = dataset_name)
+  
+  metrics <- read_csv2(file.path(dataset_name, "output_cnv", "karyotype_metrics.csv")) %>% mutate(dataset = dataset_name)
+  
+  CIN_assignment <- read_csv2(file.path(dataset_name, "output_cnv", "CNV_metrics_CIN_assignment.csv")) %>% mutate(dataset = dataset_name)
+  
+  metrics <- metrics %>%  left_join(CIN_assignment %>% select(group, CIN_status, dataset))
+  
+  fgsea_data <- rbind(fgsea_data, fgsea)
+  karyotype_scores <- rbind(karyotype_scores, metrics)
+  
+  rm(fgsea, metrics)
+}
+
+# Remove samples that were not assigned to a CIN_status
+# e.g. non tumor samples
+karyotype_scores <- karyotype_scores %>% filter(!is.na(CIN_status))
+```
+
+# Fig 1
+## Fig 1a Bakhoum Bulk 5 samples PCA
+```{r}
+# Read DESeq object
+# dds <- readRDS(file = file.path("BakhoumEtAl2018", "output_bulkPE75bp_sc5Samples", "dds.rds"))
+
+# Apply variance stabilizing transform, also does PCA
+vsd <- vst(dds, blind=FALSE)
+
+# Plot PCA scores
+plotPCA(vsd, intgroup=c("Group")) +
+geom_text_repel(
+  aes(x = PC1, y = PC2, label = name), show.legend = FALSE,
+  data = plotPCA(vsd, intgroup=c("Group"), returnData = TRUE) %>% mutate(name = c("dnMCAK","Kif2a", "Control", "MCAK","Kif2b"))) + scale_color_manual(values=c("CIN-low"="#00BFC4", "CIN-high"="#F8766D")) +
+  annotate("text", x=-15, y=5, label= "CIN-high", hjust = 0, col = "#F8766D", fontface =2) +  
+  annotate("text", x=15, y=-8.7, label= "CIN-low", hjust = 0, col = "#00BFC4", fontface =2)+
+  guides(col = FALSE)
+
+ggsave(file = file.path(source.output.dir,"Fig1a_vst_pca.png"), width=3, height=3, dpi=300)
+```
+
+## Fig 1b Bakhoum Bulk 5 samples Volcano
+```{r}
+# df.deseq.results.shrunk <- read_csv2(file = file.path("BakhoumEtAl2018", "output_bulkPE75bp_sc5Samples", "bulk_transcriptomics_deseq_shrunkLFC.csv"))
+
+alpha = 1e-15 #1e-15
+log2FCthresh = 3 #3
+
+# Volcano plot
+df.deseq.results.shrunk %>% mutate(
+  within_threshold = (padj < alpha & abs(log2FoldChange) > log2FCthresh)
+) %>% ggplot(
+  aes(x=log2FoldChange , y= -log10(padj + 1e-200), col = within_threshold)) + geom_point(alpha = 0.5) +
+geom_vline(xintercept = 0, col = "black") + 
+geom_vline(xintercept = c(-log2FCthresh, log2FCthresh), col = "red") +   geom_hline(yintercept = -log10(alpha), colour = "red") + 
+geom_text_repel(
+  aes(x = log2FoldChange, y = -log10(padj + 1e-200), label = gene), data = df.deseq.results.shrunk %>% filter(gene %in% CIN_signature), colour = "grey20", min.segment.length = 0
+  ) +
+  theme(legend.position = "none", plot.title = element_text(hjust= 0.5)) +
+  labs(
+    title = "", 
+    x = "Effect size: log2(fold-change)", 
+    y = "-log10(adjusted p-value)"
+  ) + ylim(0, 50) + #scale_color_manual(values=c("FALSE"="#00BFC4", "TRUE"="#F8766D")) +
+  annotate("text", x=0.2, y=48, label= "CIN-high", hjust = 0, col = "#F8766D", fontface =2) +  annotate("text", x=-0.2, y=48, label= "CIN-low", hjust = 1, col = "#00BFC4", fontface =2)
+# +   scale_x_continuous(breaks = seq(-6,9, by = 1))
+
+ggsave(file = file.path(source.output.dir, "Fig1b_volcano_plot_shrunk.png"), width=5, height=4, dpi=300)
+
+df.deseq.results.shrunk %>% mutate(
+  within_threshold = (padj < alpha & abs(log2FoldChange) > log2FCthresh)
+) %>% filter(within_threshold)
+
+df.deseq.results.shrunk %>% mutate(
+  within_threshold = (padj < alpha & abs(log2FoldChange) > log2FCthresh)
+) %>% filter(within_threshold) %>% filter(gene %in% CIN_signature)
+
+df.deseq.results.shrunk %>%  mutate(
+  within_threshold = (padj < 1e-10 & abs(log2FoldChange) > 2)
+) %>% filter(within_threshold) %>% filter(gene %in% CIN_signature)
+```
+
+```{r}
+# Changing thresholds
+alpha = 1e-10 #1e-15
+log2FCthresh = 2 #3
+
+# Volcano plot with different thresholds
+df.deseq.results.shrunk %>% mutate(
+  within_threshold = (padj < alpha & log2FoldChange > log2FCthresh)
+) %>% ggplot(
+  aes(x=log2FoldChange , y= -log10(padj + 1e-200), col = within_threshold)) + geom_point(alpha = 0.5) +
+geom_vline(xintercept = 0, col = "black") + 
+geom_vline(xintercept = log2FCthresh, col = "red") +
+geom_hline(yintercept = -log10(alpha), colour = "red") + 
+geom_text_repel(
+  aes(x = log2FoldChange, y = -log10(padj + 1e-200), label = gene), data = df.deseq.results.shrunk %>% filter(gene %in% CIN_signature), colour = "grey20", min.segment.length = 0
+  ) +
+  theme(legend.position = "none", plot.title = element_text(hjust= 0.5)) +
+  labs(
+    title = "", 
+    x = "Effect size: log2(fold-change)", 
+    y = "-log10(adjusted p-value)"
+  ) + ylim(0, 50) +
+  annotate("text", x=0.2, y=48, label= "CIN-high", hjust = 0, col = "#F8766D", fontface =2) +  annotate("text", x=-0.2, y=48, label= "CIN-low", hjust = 1, col = "#00BFC4", fontface =2)
+
+ggsave(file = file.path(source.output.dir, "Fig1b_volcano_plot_shrunk2.png"), width=5, height=4, dpi=300)
+
+df.deseq.results.shrunk %>% mutate(
+  within_threshold = (padj < alpha & log2FoldChange > log2FCthresh)
+) %>% filter(within_threshold)
+
+df.deseq.results.shrunk %>% mutate(
+  within_threshold = (padj < alpha & log2FoldChange > log2FCthresh)
+) %>% filter(within_threshold) %>% filter(gene %in% CIN_signature)
+
+```
+
+## Fig 1c Bakhoum Bulk 5 samples fGSEA 
+```{r}
+# fgseaRes.shrunk <- read.csv2(file = file.path("BakhoumEtAl2018", "output_bulkPE75bp_sc5Samples","bulk_fgsea_shrunkfc_CIN_highlow.csv"))
+
+fgseaRes.shrunk <- fgseaRes.shrunk %>% mutate(within_threshold = padj < 0.01, "Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low")) %>% left_join(msigdb_hallmarks_names)
+
+# Plot results
+fgseaRes.shrunk %>% mutate(padj = ifelse(padj < 0.001, 0.00101, padj)) %>% ggplot(aes(x = log10(padj), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(padj), y = NES, label = name), data = fgseaRes.shrunk %>% mutate(padj = ifelse(padj < 0.001, 0.00101, padj)) %>% filter(within_threshold  | name %in% c("Apical Surface", "MYC Targets V1", "IFN-a Response", "IFN-y Response", "OxPhos", "TGF-B Signaling", "EMT", "IL2-STAT5 Signaling", "Wnt B-Catenin Signaling", "TNF-a Signaling via NKFB", "Inflammatory Response", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20
+  ) +
+  labs(x = "FDRq", y = "Normalized Enrichment Score", col = "Enriched in") + 
+  scale_y_continuous(limits = c(-2,2), breaks = seq(-2,2,1)) + 
+  scale_x_continuous(trans = "reverse", limits = c(0, -3), breaks = c(-3, -2, -1, 0) , labels = c("<0.001", "0.01", "0.1", "1")) + 
+  scale_fill_manual(values = c("red","blue")) +
+  guides(alpha = FALSE, size = FALSE, col = FALSE) +
+  annotate("text", x=-2.6, y=0.2, label= "CIN-high", hjust = 0, col = "#F8766D", fontface =2) +  annotate("text", x=-2.6, y=-0.2, label= "CIN-low", hjust = 0, col = "#00BFC4", fontface =2)
+
+ggsave(file = file.path(source.output.dir,"Fig1c_fGSEA_bulk_5samples_results_shrunkfc.png"), width=5, height=4, dpi=300)
+
+```
+
+## Fig 1d Bakhoum fGSEA x orig
+```{r}
+# Bulk_gsea <- read.csv2(file.path("BakhoumEtAl2018", "data", "Supp_table6.csv"))
+
+# Fix typo in original data oxigen > oxygen
+Bulk_gsea <- Bulk_gsea %>% mutate(NAME = ifelse(NAME == "HALLMARK_REACTIVE_OXIGEN_SPECIES_PATHWAY", "HALLMARK_REACTIVE_OXYGEN_SPECIES_PATHWAY", NAME)) %>% left_join(msigdb_hallmarks_names %>% rename(NAME = pathway)) %>% mutate("Enriched_in" = ifelse(NES > 0, "CIN-high", "CIN-low"))
+
+# Join datasets
+fGSEA_comp <- Bulk_gsea %>% select(NAME, NES, FDR.q.val) %>% rename(orig_NES = NES, orig_FDR.q.val = FDR.q.val) %>% left_join(
+  fgseaRes.shrunk %>% select(pathway, NES, pval, padj) %>% rename(NAME = pathway)
+  ) %>% 
+  left_join(
+  msigdb_hallmarks_names %>% rename(NAME = pathway)
+  ) %>% mutate(sign_agreement = sign(orig_NES) == sign(NES))
+
+# Plot results
+fGSEA_comp %>% ggplot(aes(x = orig_NES, y = NES, col = log10(padj), shape = padj < 0.2)) + 
+  geom_point() + geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = orig_NES, y = NES, label = name), data = fGSEA_comp %>% filter(!sign_agreement), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20) + 
+  labs(x = "Orig GSEA NES", y = "fGSEA NES", shape = "Reproduction\nFDRq < 0.2", col = "Reproduction\nlog10(FDRq)") +
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -3) + 
+  guides(col=guide_colorbar(order = 1), 
+         shape = guide_legend(order = 2))
+
+ggsave(file=file.path(source.output.dir,"Fig1d_5sampleshrunkfGSEA_x_orig_p.png"), width=5, height=3.5, dpi=300)
+
+# Compare GSEA FDRq values
+fGSEA_comp %>% ggplot(aes(x=orig_FDR.q.val, y= padj, col = NES)) + geom_point() + geom_abline(slope = 1)  + labs(x = "orig_FDRq", y = "FDRq") +
+  scale_color_gradient2(low="blue", mid = "white", high="red", midpoint = 0)
+
+# ggsave(file=file.path(source.output.dir,"shrunkfGSEA_x_orig,fdr.png"), width=6, height=4, dpi=300)
+```
+
+## Fig 1e Compare Z-stat FGSEA and original GSEA NES
+```{r}
+# fgseaRes.noLFC.stat <- read.csv2(file = file.path("BakhoumEtAl2018", "output_bulkPE75bp_sc3Samples","bulk_fgsea_Zstat_CIN_highlow_3samples.csv"))
+
+# fGSEA x Bulk
+fGSEA_comp2 <- Bulk_gsea %>% select(NAME, NES, FDR.q.val) %>% rename(orig_NES = NES, orig_FDR.q.val = FDR.q.val) %>% left_join(
+  fgseaRes.noLFC.stat %>% select(pathway, NES, pval, padj) %>% rename(NAME = pathway)
+  ) %>% 
+  left_join(
+  msigdb_hallmarks_names %>% rename(NAME = pathway)
+  ) %>% mutate(sign_agreement = sign(orig_NES) == sign(NES))
+
+# Plot results
+fGSEA_comp2 %>% ggplot(aes(x = orig_NES, y = NES, col = log10(padj), shape = padj < 0.2)) + 
+  geom_point() + geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = orig_NES, y = NES, label = name), data = fGSEA_comp2 %>% filter(!sign_agreement), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20) + 
+  labs(x = "Orig GSEA NES", y = "fGSEA NES", shape = "3-sample\nFDRq < 0.2", col = "3-sample\nlog10(FDRq)") +
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -3) + 
+  guides(col=guide_colorbar(order = 1), 
+         shape = guide_legend(order = 2))
+
+ggsave(file=file.path(source.output.dir,"Fig1e_3samplestatfGSEA_x_orig_p.png"), width=5, height=3.5, dpi=300)
+
+# Compare GSEA FDRq values
+fGSEA_comp %>% ggplot(aes(x=orig_FDR.q.val, y= padj, col = NES)) + geom_point() + geom_abline(slope = 1)  + labs(x = "orig_FDRq", y = "FDRq") +
+  scale_color_gradient2(low="blue", mid = "white", high="red", midpoint = 0)
+
+# ggsave(file=file.path(source.output.dir,"statfGSEA_x_orig,fdr.png"), width=6, height=4, dpi=300)
+
+```
+# Fig 2
+## Fig 2a Bakhoum UMAP
+```{r}
+# Seurat_object <- readRDS(file = file.path("BakhoumEtAl2018", "output_sc", "Seurat_object_n.rds"))
+p <- DimPlot(Seurat_object, reduction = "umap", group.by = "Sample")
+
+ggsave(p, file=file.path(source.output.dir,"Fig2a_bakhoum_umap.png"), width=6, height=4, dpi=300)
+```
+
+## Fig 2b Bakhoum sc_pseudobulk x 3 sample bulk
+```{r}
+# Check agreement between the sign of genes
+table(sign(CIN.DE.c_noLFC$log2FoldChange.bulk), sign(CIN.DE.c_noLFC$log2FoldChange.sc))
+
+round(prop.table(table(sign(CIN.DE.c_noLFC$log2FoldChange.bulk), sign(CIN.DE.c_noLFC$log2FoldChange.sc))), 3)
+
+# Remove genes without log2 fold changes
+CIN.DE.c_noLFC.f <- CIN.DE.c_noLFC %>% filter(!is.na(log2FoldChange.bulk)) %>% filter(!is.na(log2FoldChange.sc))
+# Measure correlation between log2 fold changes
+bulk_sc_cor <- cor(CIN.DE.c_noLFC.f$log2FoldChange.bulk, CIN.DE.c_noLFC.f$log2FoldChange.sc) %>% round(3)
+
+CIN.DE.c_noLFC_cutoff <- CIN.DE.c_noLFC %>% filter(CINhigh_pct >= 0.01) 
+CIN.DE.c_noLFC_cutoff %>% nrow()
+
+bulk_sc_cor_f <- cor(CIN.DE.c_noLFC_cutoff$log2FoldChange.bulk, CIN.DE.c_noLFC_cutoff$log2FoldChange.sc) %>% round(3)
+
+# Check agreement between the sign of genes
+table(sign(CIN.DE.c_noLFC_cutoff$stat.bulk), sign(CIN.DE.c_noLFC_cutoff$stat.sc))
+
+round(prop.table(table(sign(CIN.DE.c_noLFC_cutoff$stat.bulk), sign(CIN.DE.c_noLFC_cutoff$stat.sc))), 3)
+```
+
+```{r}
+p0 <- CIN.DE.c_noLFC %>% 
+  ggplot(aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = sc_mean, col = -log10(pvalue.sc), alpha = CINhigh_pct)) + 
+  geom_point() + 
+  geom_hline(yintercept = 0, alpha = 0.5) + 
+  geom_vline(xintercept = 0, alpha = 0.5) + 
+  geom_abline(slope = 1, col = "blue", alpha = 0.5) + 
+  labs(title = "", x = "Bulk log2 FC", y = "scRNA-seq pseudobulk log2 FC", col = "-log10(sc.pval)") + 
+  geom_text_repel(
+  aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = 1, label = symbol, alpha = 1), data = CIN.DE.c_noLFC %>% filter(symbol %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 15, show.legend = FALSE
+  ) + 
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + 
+  scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 5) +
+  guides(size = guide_legend(nrow = 2, byrow = T, order = 3),
+         alpha = guide_legend(nrow = 2, byrow = T, order = 2),
+         color = guide_colourbar(direction = "vertical", order = 1)) +
+  annotate("text", x=-11, y=9, label= paste0("corr: ", bulk_sc_cor), hjust = 0) +
+  annotate("text", x=-11.2, y=7.5, label= paste0("*corr: ", bulk_sc_cor_f), hjust = 0)
+
+guide_color  <- get_legend(p0 + guides(alpha = "none", size = "none"))
+
+Fig2b <- plot_grid(p0 + 
+            guides(color = "none") + 
+            theme(legend.position = "bottom"), 
+          guide_color, 
+          ncol = 2, rel_widths = c(.85, .2)) +
+  theme(plot.background = element_rect(fill = "white", colour = "white"))
+
+print(Fig2b)
+
+ggsave(Fig2b, file=file.path(source.output.dir,"Fig2b_pseudobulk_sc_x_bulk_noLFC.png"), width=5.75, height=4, dpi=300)
+```
+
+```{r}
+# Same plot, but filtering gene expression in CIN-high in at least 1% of cells
+CIN.DE.c_noLFC_cutoff <- CIN.DE.c_noLFC %>% filter(CINhigh_pct >= 0.01) 
+CIN.DE.c_noLFC_cutoff %>% nrow()
+
+bulk_sc_cor_f <- cor(CIN.DE.c_noLFC_cutoff$log2FoldChange.bulk, CIN.DE.c_noLFC_cutoff$log2FoldChange.sc) %>% round(3)
+
+# Check agreement between the sign of genes
+table(sign(CIN.DE.c_noLFC_cutoff$stat.bulk), sign(CIN.DE.c_noLFC_cutoff$stat.sc))
+
+round(prop.table(table(sign(CIN.DE.c_noLFC_cutoff$stat.bulk), sign(CIN.DE.c_noLFC_cutoff$stat.sc))), 3)
+
+p0 <- CIN.DE.c_noLFC_cutoff %>% 
+  ggplot(aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = sc_mean, col = -log10(pvalue.sc), alpha = CINhigh_pct)) + 
+  geom_point() + 
+  geom_hline(yintercept = 0, alpha = 0.5) + 
+  geom_vline(xintercept = 0, alpha = 0.5) + 
+  geom_abline(slope = 1, col = "blue", alpha = 0.5) + 
+  labs(title = "", x = "Bulk log2 FC", y = "scRNA-seq pseudobulk log2 FC", col = "-log10(sc.pval)") + 
+  geom_text_repel(
+  aes(x = log2FoldChange.bulk, y = log2FoldChange.sc, size = 1, label = symbol, alpha = 1), data = CIN.DE.c_noLFC_cutoff %>% filter(symbol %in% CIN_signature), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20, show.legend = FALSE
+  ) + 
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "bottom") + 
+  scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 5) +
+  guides(size = guide_legend(nrow = 2, byrow = T, order = 3),
+         alpha = guide_legend(nrow = 2, byrow = T, order = 2),
+         color = guide_colourbar(direction = "vertical", order = 1)) +
+  annotate("text", x=-4.5, y=9, label= paste0("corr: ", bulk_sc_cor_f), hjust = 0)
+
+guide_color2  <- get_legend(p0 + guides(alpha = "none", size = "none"))
+
+Fig2e <- plot_grid(p0 + 
+            guides(color = "none") + 
+            theme(legend.position = "bottom"), 
+          guide_color2, 
+          ncol = 2, rel_widths = c(.85, .2)) +
+  theme(plot.background = element_rect(fill = "white", colour = "white"))
+
+print(Fig2e)
+
+ggsave(Fig2e, file=file.path(source.output.dir,"Fig2_e_pseudobulk_sc_x_bulk_noLFC.png"), width=5.5, height=4, dpi=300)
+
+```
+
+## Fig 2c Bakhoum sc fgsea
+```{r}
+# Plot fgsea results
+fgseaRes.deseqstat %>% mutate(padj = ifelse(padj < 0.0001, 0.000101, padj)) %>% ggplot(aes(x = log10(padj), y = NES)) +
+  geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
+  geom_hline(yintercept = 0, col = "black") +
+  geom_text_repel(
+  aes(x = log10(padj), y = NES, label = name), data = fgseaRes.deseqstat  %>% mutate(padj = ifelse(padj < 0.0001, 0.000101, padj)) %>% filter(within_threshold | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 15
+  ) +
+  labs(x = "FDRq", y = "Normalized Enrichment Score", col = "Enriched in") + 
+  scale_y_continuous(limits = c(-3,3), breaks = seq(-3,3,1)) + 
+  scale_x_continuous(trans = "reverse", limits = c(0, -4), breaks = c(-4, -3, -2, -1, 0) , labels = c("<0.0001", "0.001", "0.01", "0.1", "1")) + scale_fill_manual(values = c("red","blue")) + guides(alpha = FALSE, size = FALSE) +
+  guides(col = FALSE) +
+  annotate("text", x=-3.4, y=0.2, label= "CIN-high", hjust = 0, col = "#F8766D", fontface =2) +  annotate("text", x=-3.4, y=-0.2, label= "CIN-low", hjust = 0, col = "#00BFC4", fontface =2)
+
+ggsave(file = file.path(source.output.dir,"Fig2c_fGSEA_sc_statpseudobulk.png"), width=5, height=4, dpi=300)
+
+``` 
+## Fig 2d Bakhoum fGSEA sc pseudobulk x 3 sample bulk
+```{r}
+# Plot single cell pseudo bulk fGSEA x Bulk
+fGSEA_comp3 <- fgseaRes.noLFC.stat %>%
+  left_join(fgseaRes.deseqstat, suffix= c(".bulk", ".sc"), by = "pathway")  %>% 
+  left_join(msigdb_hallmarks_names) %>% 
+  mutate(sign_agreement = sign(NES.bulk) == sign(NES.sc))
+
+fGSEA_comp3 %>% 
+  ggplot(aes(x = NES.bulk, y = NES.sc, col = log10(padj.sc+1e-300), shape = padj.sc < 0.2))+
+  geom_point() + 
+  geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = NES.bulk, y = NES.sc, label = name), data = fGSEA_comp3 %>% filter(!sign_agreement & padj.sc < 0.01 | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 4, force_pull = 1, min.segment.length = 0, max.overlaps = 20) + 
+  labs(x = "Bulk GSEA NES", y = "scRNA GSEA NES", color = "single-cell\nlog10(FDRq)", shape = "single-cell\nFDRq < 0.2") +
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -1) + 
+  guides(col=guide_colorbar(order = 1), 
+         shape = guide_legend(order = 2))
+
+ggsave(file = file.path(source.output.dir, "Fig2d_fGSEA_scRNA_stat_x_3s_bulk.png"), width=5.5, height=3.5, dpi=300)
+
+```
+
+
+# Fig 3
+## Fig 3a InferCNV plot
+```{r}
+knitr::include_graphics(file.path("BakhoumEtAl2018", "output_cnv", "/infer_cnv_reorder.png"))
+
+knitr::include_graphics(file.path("TijhuisEtAl202X", "output_cnv", "/infer_cnv_reorder.png"))
+
+```
+
+```{r}
+# Seurat_object_tijhuis <- readRDS(file = file.path("TijhuisEtAl202X", "output_sc", "Seurat_object_n.rds"))
+# p <- DimPlot(Seurat_object_tijhuis, reduction = "umap", group.by = "annotation")
+# 
+# ggsave(p, file=file.path(source.output.dir,"Fig3_tijhuis_umap.png"), width=6, height=4, dpi=300)
+```
+
+## Fig 3b/c Karyotype scores
+```{r}
+for (dataset_name in c("BakhoumEtAl2018", "TijhuisEtAl202X")) {
+  scores <- karyotype_scores %>% filter(dataset == dataset_name) 
+  
+  scores %>%
+  ggplot(aes(x = heterogeneity_score, y = aneuploidy_score, col = CIN_status)) + 
+  geom_point() + 
+  geom_text_repel(aes(x = heterogeneity_score, y  = aneuploidy_score, label = group), show.legend=FALSE) + 
+  xlim(0,  max(scores$heterogeneity_score) + 0.05) + 
+  ylim(0, max(scores$aneuploidy_score) + 0.01) + 
+  labs(x = "Heterogeneity Score", y = "Aneuploidy Score")
+ 
+  ggsave(file = file.path(source.output.dir, paste0("Fig3bc_", dataset_name, "_scores.png")), width=4, height=2, dpi=300)
+}
+```
+
+## Fig 3d Compare Bakhoum and Tijhuis GSEA
+```{r}
+fGSEA_comp4 <- fgsea_data %>% filter(dataset %in% c("BakhoumEtAl2018")) %>%
+  left_join(
+  fgsea_data %>% filter(dataset %in% c("TijhuisEtAl202X")) %>% select(-c(pathway))
+  , by = "name", suffix = c(".bakhoum",".tijhuis")) %>% 
+  mutate(sign_agreement = sign(NES.bakhoum) == sign(NES.tijhuis))
+
+fGSEA_comp4 %>% 
+  ggplot(aes(x = NES.bakhoum, y = NES.tijhuis, col = log10(padj.tijhuis+1e-300), shape = padj.tijhuis < 0.2)) +
+  geom_point() + 
+  geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = NES.bakhoum, y = NES.tijhuis, label = name), data = fGSEA_comp4 %>% filter(!sign_agreement & (padj.bakhoum < 0.01 | padj.tijhuis < 0.01) | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20) + 
+  labs(x = "Bakhoum fGSEA NES", y = "Tijhuis fGSEA NES", color = "Tijhuis\nlog10(FDRq)", shape = "Tijhuis\nFDRq < 0.2") +
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -2)
+
+ggsave(file = file.path(source.output.dir, "Fig3d_BakhoumxTijhuis_NES.png"), width=5, height=3.5, dpi=300)
+```
+
+# Fig 4 Karyotype Scores
+```{r}
+score_correlation <- cor(karyotype_scores$aneuploidy_score, karyotype_scores$heterogeneity_score) %>% round(3)
+
+karyotype_scores %>% 
+  left_join(
+  karyotype_scores %>% group_by(dataset, CIN_status) %>% summarize(n_samples = n()) %>% pivot_wider(values_from = n_samples, names_from = CIN_status), 
+  by = "dataset") %>%
+  mutate(n_samples = CIN_high + CIN_low, dataset = paste0(dataset , "(", as.character(CIN_high),"/", as.character(CIN_low), ")")) %>% 
+  ggplot(aes(x = heterogeneity_score, y = aneuploidy_score, col = dataset, shape = CIN_status)) + 
+  geom_point() +
+  labs(x = "Heterogeneity Score", y = "Aneuploidy Score", col = "Dataset (CIN-high/CIN-low)") +
+  guides(col=guide_legend(ncol=2,  order = 1), 
+         shape = guide_legend(order = 2)) +
+  annotate("text", x=0.02, y=0.075, label= paste0("corr: ", score_correlation), hjust = 0)
+
+ggsave(file = file.path(source.output.dir, "Fig4_karyotype_scores_p.png"), width=8, height=4, dpi=300)
+
+```
+
+# Fig 5 Heatmap datasets and HALLMARK NES
+```{r}
+colfunc <- colorRampPalette(c("blue", "white", "red"))
+
+# Pheatmap
+NESpheatmap <- fgsea_data %>% select(name, NES, dataset) %>% pivot_wider(values_from = NES, names_from = name) %>% column_to_rownames("dataset") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix() %>% pheatmap(color = colfunc(10))
+
+# Pheatmap HC order
+pheatmap_hc_order <- NESpheatmap$tree_row$labels[NESpheatmap$tree_row$order]
+
+# Get p-value from a one sample t test
+get_os_t_test_pval = function(x){
+  t_res <- t.test(x, mu = 0)
+  return(t_res$p.value)
+}
+
+# For each gene set, perform one sample t-tests of the NES across datasets versus the mean of zero, then apply FDR correction
+NES_tests <- fgsea_data %>%
+  group_by(pathway, name) %>% 
+  summarize(
+    mean_NES = mean(NES), 
+    pval = get_os_t_test_pval(NES)
+    ) %>% ungroup() %>% 
+  mutate(padj = p.adjust(pval, method = "fdr")) %>%
+  arrange(mean_NES) 
+
+# Restructure containing the data with NES means and t-tests.
+# Columns are renamed to be added to the larger fgsea df
+NES_tests_df <- NES_tests %>% mutate(
+  NES = mean_NES, 
+  dataset = "NES dataset mean", 
+  ES = "NA", size = "NA", log2err = "NA",
+  within_threshold = pval < 0.1,
+  Enriched_in = ifelse(NES > 0, "CIN-high", "CIN-low")) %>%
+  select(-mean_NES)
+
+# Append NES mean data
+fgsea_data_mean <- fgsea_data
+fgsea_data_mean <- fgsea_data_mean %>% 
+  rbind(NES_tests_df[, colnames(fgsea_data_mean)])
+
+# Convert the name column to a factor, with levels reordered by NES tests order (ascending mean NES)
+fgsea_data_mean$name <- factor(as.character(fgsea_data_mean$name), levels = NES_tests$name)
+
+# Convert the dataset column to a factor, with levels reordered by the pheatmap HC, and with the mean NES row first
+fgsea_data_mean$dataset <- factor(as.character(fgsea_data_mean$dataset), levels = rev(c("NES dataset mean", pheatmap_hc_order)))
+
+# Plot heatmapt with geom_tile
+fgsea_data_mean %>% ggplot(
+  aes(y = dataset, x = name, fill = NES)
+  ) + geom_tile()  + 
+  geom_point(aes(size=ifelse(padj < 0.2, "dot", "no_dot"))) + 
+  geom_point(aes(size=ifelse(dataset == "NES dataset mean" & pval < 0.2, "dot", "no_dot"), shape = "2", show_guide = FALSE)) +
+   scale_size_manual(values=c(dot=0.5, no_dot=NA), guide="none") +
+  scale_fill_gradient2(low="blue", mid= "white", high="red", midpoint = 0)  +
+  labs(title = "", x = "", y = "Dataset") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  guides(size=FALSE, shape = FALSE)
+
+ggsave(file = file.path(source.output.dir, "Fig5_NES_heatmap.png"), width=8, height=4, dpi=300)
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+```

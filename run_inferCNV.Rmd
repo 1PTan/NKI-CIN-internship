@@ -47,7 +47,7 @@ set.seed(42)
 folder = params$folder
 
 # generate output dir path named data
-source.output.dir <- file.path(paste0(folder, "/", params$cnv_output_dir))
+source.output.dir <- file.path(file.path(folder, params$cnv_output_dir))
 
 # if source output dir does not exist, create it
 if (!dir.exists(source.output.dir)) {
@@ -60,7 +60,7 @@ if (!dir.exists(source.output.dir)) {
 
 # Loading data
 ```{r Loading data}
-Seurat_object <- readRDS(file = paste0(folder, "/output_sc/Seurat_object_n.rds"))
+Seurat_object <- readRDS(file = file.path(folder, "output_sc", "Seurat_object_n.rds"))
 
 Seurat_object[[]]$Project %>% unique()
 ```
@@ -75,13 +75,13 @@ gene.features <- gene.features %>% column_to_rownames("gene_symbol")
 # Get annotations
 ```{r}
 # annot_scRNA <- Seurat_object@meta.data %>% select(annotation)
-annot_scRNA <- read.table(file = paste0(folder ,"/cellAnnotations.txt"))
+annot_scRNA <- read.table(file = file.path(folder ,"cellAnnotations.txt"))
 colnames(annot_scRNA) <- c("cell_id", "annotation")
 annot_scRNA <- annot_scRNA %>% column_to_rownames("cell_id")
 
 table(annot_scRNA$annotation)
 
-ref_group_names <- read.csv2(file = paste0(folder, "/ref_group_names.csv"))
+ref_group_names <- read.csv2(file = file.path(folder, "ref_group_names.csv"))
 ref_group_names$annotation
 ```
 ```{r}
@@ -99,7 +99,7 @@ dim(count_matrix)
 infercnv_scRNA <- CreateInfercnvObject(
   raw_counts_matrix = count_matrix, 
   gene_order_file = gene.features, 
-  annotations_file = paste0(folder ,"/cellAnnotations.txt"),
+  annotations_file = file.path(folder ,"cellAnnotations.txt"),
   ref_group_names=ref_group_names$annotation
 )
 
@@ -124,15 +124,15 @@ infercnv_scRNA@gene_order$chr <- factor(as.character(infercnv_scRNA@gene_order$c
 
 levels(infercnv_scRNA@gene_order$chr)
 
-plot_cnv(infercnv_scRNA, output_filename = "infer_cnv", out_dir = source.output.dir, write_expr_matrix = TRUE, contig_cex = 3)
+# plot_cnv(infercnv_scRNA, output_filename = "infer_cnv", out_dir = source.output.dir, write_expr_matrix = FALSE, contig_cex = 3)
 ```
 
 ```{r}
-knitr::include_graphics(paste(source.output.dir, "infer_cnv.png", sep="/"))
+# knitr::include_graphics(file.path(source.output.dir, "infer_cnv.png"))
 ```
 
 ```{r}
-cnv_object <- readRDS(file = paste0(source.output.dir, "/run.final.infercnv_obj"))
+cnv_object <- readRDS(file = file.path(source.output.dir, "run.final.infercnv_obj"))
 ```
 
 # Reorder plot
@@ -174,11 +174,11 @@ CNV_metrics <- infercnv_karyotypeMeasures(expr.data = CNVexp, group_list = group
 
 CNV_metrics
 
-CNV_metrics %>% write_csv2(paste0(source.output.dir, "/karyotype_metrics.csv"))
+CNV_metrics %>% write_csv2(file.path(source.output.dir, "karyotype_metrics.csv"))
 ```
 
 ```{r}
-CNV_metrics <- read_csv2(paste0(source.output.dir, "/karyotype_metrics.csv"))
+CNV_metrics <- read_csv2(file.path(source.output.dir, "karyotype_metrics.csv"))
 ```
 
 ```{r}
@@ -186,19 +186,49 @@ CNV_metrics %>% column_to_rownames("group") %>% round(4)
 
 CNV_metrics %>% ggplot(aes(x = heterogeneity_score, y = aneuploidy_score, col = group)) + geom_point() + geom_text_repel(aes(x = heterogeneity_score, y  = aneuploidy_score, label = group)) + theme(legend.position = "none") + xlim(0,  max(CNV_metrics$heterogeneity_score) + 0.1) + ylim(0, max(CNV_metrics$aneuploidy_score) + 0.01)
 
-ggsave(file = paste0(source.output.dir, "/karyotype_metrics.png"), width=6, height=5, dpi=300)
+ggsave(file = file.path(source.output.dir, "karyotype_metrics.png"), width=6, height=5, dpi=300)
 ```
 # Median Filtering
 ```{r Median Filtering}
 infercnv_obj_medianfiltered = infercnv::apply_median_filtering(copy_infercnv_obj)
 
+saveRDS(infercnv_obj_medianfiltered, file = file.path(source.output.dir, "infercnv_medf.rds"))
+
 plot_cnv(infercnv_obj_medianfiltered, output_filename = "infer_cnv_median_filtered", out_dir = source.output.dir, write_expr_matrix = TRUE, contig_cex = 3)
 
-knitr::include_graphics(paste(source.output.dir, "infer_cnv_median_filtered.png", sep="/"))
+```
+# Karyotype Measures
+```{r Karyotype Measures Median Filter}
+CNVexp_medf <- as.data.frame(infercnv_obj_medianfiltered@expr.data)
+
+annot_scRNA <- annot_scRNA %>% rownames_to_column("Sample") %>% filter(Sample %in% colnames(CNVexp_medf)) %>% column_to_rownames("Sample")
+
+levels = (annot_scRNA %>% distinct())$annotation
+
+groups = list()
+
+for (i in 1:length(levels)){
+  groups[[levels[i]]] = levels[i] == annot_scRNA$annotation
+}
+
+CNV_metrics_medf <- infercnv_karyotypeMeasures(expr.data = CNVexp_medf, group_list = groups)
+
+CNV_metrics_medf
+
+CNV_metrics_medf %>% write_csv2(file.path(source.output.dir, "karyotype_metrics_medf.csv"))
+
+CNV_metrics_medf %>% column_to_rownames("group") %>% round(4) 
+
+CNV_metrics_medf %>% ggplot(aes(x = heterogeneity_score, y = aneuploidy_score, col = group)) + geom_point() + geom_text_repel(aes(x = heterogeneity_score, y  = aneuploidy_score, label = group)) + theme(legend.position = "none") + xlim(0,  max(CNV_metrics_medf$heterogeneity_score) + 0.1) + ylim(0, max(CNV_metrics_medf$aneuploidy_score) + 0.01)
+
+ggsave(file = file.path(source.output.dir, "karyotype_metrics_medf.png"), width=6, height=5, dpi=300)
 ```
 
 ```{r}
-knitr::include_graphics(paste0(source.output.dir, "/karyotype_metrics.png"))
+knitr::include_graphics(file.path(source.output.dir, "infer_cnv_median_filtered.png"))
+
+
+knitr::include_graphics(file.path(source.output.dir, "karyotype_metrics.png"))
 ```
 
 # sessionInfo - Package Versions

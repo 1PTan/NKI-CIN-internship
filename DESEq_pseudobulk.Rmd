@@ -51,7 +51,7 @@ folder = params$folder
 export = params$export
 
 # generate output dir path named data
-source.output.dir <- file.path(paste0(folder, "/output_DE"))
+source.output.dir <- file.path(file.path(folder, "output_DE"))
 
 # if source output dir does not exist, create it
 if (!dir.exists(source.output.dir)) {
@@ -65,9 +65,9 @@ if (!dir.exists(source.output.dir)) {
 # Load data
 ```{r Load data}
 # Load data
-Seurat_object <- readRDS(file = paste0(folder, "/output_sc/Seurat_object_n.rds"))
+Seurat_object <- readRDS(file = file.path(folder, "output_sc", "Seurat_object_n.rds"))
 
-group_assignment <- read_csv2(paste0(folder, "/output_cnv/CNV_metrics_CIN_assignment.csv"))
+group_assignment <- read_csv2(file.path(folder, "output_cnv", "CNV_metrics_CIN_assignment.csv"))
 
 Seurat_object[[]]$Project %>% unique()
 ```
@@ -84,7 +84,7 @@ Seurat_object@meta.data$annotation <-  sc_CIN$annotation
 ```
 
 ```{r}
-# Get means of sc expression per gene
+# Get means of sc expression per gene from "data" and "count" slots
 mat <- Seurat::GetAssayData(Seurat_object, assay = "RNA", slot = "data")
 
 sc_means <- mat %>% rowMeans() %>% as.data.frame() %>% rename("sc_mean" = ".") %>% rownames_to_column("symbol")
@@ -94,7 +94,7 @@ sc_mean_counts <- Seurat::GetAssayData(Seurat_object, assay = "RNA", slot = "cou
 sc_means <- sc_means %>% left_join(sc_mean_counts, by = "symbol") %>% mutate(gene = symbol)
 
 if(export){
-sc_means %>% write_csv2(file = paste0(source.output.dir, "/sc_means.csv"))
+sc_means %>% write_csv2(file = file.path(source.output.dir, "sc_means.csv"))
 }
 
 rm(mat, sc_mean_counts)
@@ -106,13 +106,15 @@ Seurat_metadata <- Seurat_object@meta.data
 
 sc_counts <- Seurat::GetAssayData(Seurat_object, assay = "RNA", slot = "counts")
 
+# Only select cells that have a heterogeneity score (tumor cells)
 sc_counts <- sc_counts[, !isNA(Seurat_metadata$heterogeneity_score)]
 
+# Transpose matrix and convert to a dataframe to aggregate by sample
 sc_counts_df <- as.data.frame(sparseToDenseMatrix(sc_counts %>% t()))
 
 sc_counts_df[1:2, 1:2]
 
-# Add annotation
+# Add annotation - tumor sample
 sc_counts_df_sum <- sc_counts_df %>% rownames_to_column("sample") %>% left_join(
   Seurat_object@meta.data %>% filter(!isNA(heterogeneity_score)) %>% rownames_to_column("sample") %>% select(sample, annotation), by = "sample"
   ) %>% column_to_rownames("sample")
@@ -128,6 +130,7 @@ gc()
 ```
 
 ```{r}
+# transpose the dataframe and convert to a sparse matrix
 sc_counts <- sc_counts_df_sum %>% column_to_rownames("annotation") %>% as.matrix() %>% t() %>% as("dgCMatrix")
 rm(sc_counts_df_sum)
 
@@ -135,7 +138,7 @@ rm(sc_counts_df_sum)
 sc_counts <- round(sc_counts)
 ```
 
-# DESEq2
+# DESeq2
 ```{r}
 design_c <- group_assignment %>% select(group, CIN_status)
 colnames(design_c) <- c("Sample", "CIN_status")
@@ -180,6 +183,7 @@ deseq.dataset$CIN_status <- factor(deseq.dataset$CIN_status, levels = c("CIN_low
 # create DESeq object
 ddsWald <- DESeq(deseq.dataset, test = "Wald")
 
+# Log fold shrinkage
 ddsWald_apeglm <- lfcShrink(ddsWald, coef = "CIN_status_CIN_high_vs_CIN_low", type = "apeglm")
 
 ```
@@ -197,9 +201,9 @@ df.deseq.pseudobulkWald.apeglm <- ddsWald_apeglm %>%
   rownames_to_column("gene")
 
 # Export
-df.deseq.pseudobulkWald %>% write.csv2(paste0(source.output.dir, "/df.deseq.results.pseudobulkWald.csv"), row.names = FALSE)
+df.deseq.pseudobulkWald %>% write.csv2(file.path(source.output.dir, "df.deseq.results.pseudobulkWald.csv"), row.names = FALSE)
  
-df.deseq.pseudobulkWald.apeglm %>% write.csv2(paste0(source.output.dir, "/df.deseq.results.pseudobulkWald.apeglm.csv"), row.names = FALSE)
+df.deseq.pseudobulkWald.apeglm %>% write.csv2(file.path(source.output.dir, "df.deseq.results.pseudobulkWald.apeglm.csv"), row.names = FALSE)
 
 ```
 
@@ -259,9 +263,9 @@ df.deseq.pseudobulk.Waldscore.apeglm <- ddsWaldscore_apeglm %>%
   rownames_to_column("gene")
 
 # Export
-df.deseq.pseudobulk.Waldscore %>% write.csv2(paste0(source.output.dir, "/df.deseq.results.pseudobulkWaldscore.csv"), row.names = FALSE)
+df.deseq.pseudobulk.Waldscore %>% write.csv2(file.path(source.output.dir, "df.deseq.results.pseudobulkWaldscore.csv"), row.names = FALSE)
 
-df.deseq.pseudobulk.Waldscore.apeglm %>% write.csv2(paste0(source.output.dir, "/df.deseq.results.pseudobulkWaldscore.apeglm.csv"), row.names = FALSE)
+df.deseq.pseudobulk.Waldscore.apeglm %>% write.csv2(file.path(source.output.dir, "df.deseq.results.pseudobulkWaldscore.apeglm.csv"), row.names = FALSE)
 ```
 
 ```{r}
@@ -297,9 +301,10 @@ geom_text_repel(
   )  + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 1)
 
 if(export){
-  ggsave(file=paste0(source.output.dir,"/deseq2Wald_pseudobulk_volcano.png"), width=6, height=4, dpi=300)
+  ggsave(file=file.path(source.output.dir,"deseq2Wald_pseudobulk_volcano.png"), width=6, height=4, dpi=300)
 }
 
+# Log fold shrunk apeglm
 df.deseq.pseudobulkWald.apeglm  %>% ggplot(
   aes(x=log2FoldChange , y= -log10(pvalue + 1e-300), col = sc_mean, shape = pvalue > 0.01)) + 
   geom_point(alpha = 0.8) +
@@ -316,11 +321,12 @@ geom_text_repel(
   )  + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 1)
 
 if(export){
-  ggsave(file=paste0(source.output.dir,"/deseq2Waldapeglm_pseudobulk_volcano.png"), width=6, height=4, dpi=300)
+  ggsave(file=file.path(source.output.dir,"deseq2Waldapeglm_pseudobulk_volcano.png"), width=6, height=4, dpi=300)
 }
 ```
 
 ```{r}
+# Heterogeneity score model
 df.deseq.pseudobulk.Waldscore <- df.deseq.pseudobulk.Waldscore %>% mutate(
   within_threshold = (padj < alpha & abs(log2FoldChange) > log2FCthresh)
 ) %>% left_join(sc_means) 
@@ -340,7 +346,7 @@ geom_text_repel(
   )  + scale_color_gradient2(low="red", mid = "gray", high="blue", midpoint = 1)
 
 if(export){
-  ggsave(file=paste0(source.output.dir,"/deseq2Waldscore_pseudobulk_volcano.png"), width=6, height=4, dpi=300)
+  ggsave(file=file.path(source.output.dir,"deseq2Waldscore_pseudobulk_volcano.png"), width=6, height=4, dpi=300)
 }
 
 
@@ -356,12 +362,12 @@ msigdb_hallmarks_names <- read.csv2(file = "names_hallmarks.csv")
 ```
 
 # CIN High x CIN Low
-## FGSEA
+## Run fGSEA
 ```{r}
-# Wald stat
+# Using log2 fold change as a ranking metric
 CIN_fc_rnk.deseq <- df.deseq.pseudobulkWald %>% select(gene, log2FoldChange) %>% deframe()
  
-# fgseaRes.deseqstat <- read.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_CIN_highlow.csv"))
+# fgseaRes.deseqstat <- read.csv2(file = file.path(source.output.dir, "scRNA_fgsea_CIN_highlow.csv"))
 
 fgseaRes.deseq <- fgsea(pathways = msigdb_hallmarks_set,
                   stats    = CIN_fc_rnk.deseq,
@@ -375,6 +381,7 @@ fgseaRes.deseq <- fgseaRes.deseq %>% mutate(within_threshold = padj < 0.01, "Enr
 
 fgseaRes.deseq %>% select(NES, pval, padj) %>% summary()
 
+# Plot results
 fgseaRes.deseq %>% mutate(padj = ifelse(padj < 0.001, 0.00101, padj)) %>% ggplot(aes(x = log10(padj), y = NES)) +
   geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
   geom_hline(yintercept = 0, col = "black") +
@@ -398,22 +405,22 @@ for (i in 1:length(leading_edge$leadingEdge)){
 }
 
 if (export){
-ggsave(file = paste0(source.output.dir, "/fGSEA_pseudobulk_deseq.png"), width=8, height=5, dpi=300)
+ggsave(file = file.path(source.output.dir, "fGSEA_pseudobulk_deseq.png"), width=8, height=5, dpi=300)
 }
 
 if(export){
-  fgseaRes.deseq %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/pseudobulk_fgsea_deseq.csv"), row.names = FALSE)
+  fgseaRes.deseq %>% select(-leadingEdge) %>% write.csv2(file = file.path(source.output.dir, "pseudobulk_fgsea_deseq.csv"), row.names = FALSE)
 
-  leading_edge_df %>% write.csv2(file = paste0(source.output.dir, "/pseudobulk_fgsea_deseq_leadingedge.csv"), row.names = FALSE)
+  leading_edge_df %>% write.csv2(file = file.path(source.output.dir, "pseudobulk_fgsea_deseq_leadingedge.csv"), row.names = FALSE)
   }
 ```
 
 ## FGSEA DESeq Stat
 ```{r}
-# Wald stat
+# Using Wald stat as a ranking metric
 CIN_fc_rnk.deseqstat <- df.deseq.pseudobulkWald %>% select(gene, stat) %>% deframe()
  
-# fgseaRes.deseqstat <- read.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_CIN_highlow.csv"))
+# fgseaRes.deseqstat <- read.csv2(file = file.path(source.output.dir, "scRNA_fgsea_CIN_highlow.csv"))
 
 fgseaRes.deseqstat <- fgsea(pathways = msigdb_hallmarks_set,
                   stats    = CIN_fc_rnk.deseqstat,
@@ -427,6 +434,7 @@ fgseaRes.deseqstat <- fgseaRes.deseqstat %>% mutate(within_threshold = padj < 0.
 
 fgseaRes.deseqstat %>% select(NES, pval, padj) %>% summary()
 
+# Plot results
 fgseaRes.deseqstat %>% mutate(padj = ifelse(padj < 0.001, 0.00101, padj)) %>% ggplot(aes(x = log10(padj), y = NES)) +
   geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
   geom_hline(yintercept = 0, col = "black") +
@@ -450,13 +458,13 @@ for (i in 1:length(leading_edge$leadingEdge)){
 }
 
 if (export){
-ggsave(file = paste0(source.output.dir, "/fGSEA_pseudobulk_deseqstat.png"), width=8, height=5, dpi=300)
+ggsave(file = file.path(source.output.dir, "fGSEA_pseudobulk_deseqstat.png"), width=8, height=5, dpi=300)
 }
 
 if(export){
-  fgseaRes.deseqstat %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/pseudobulk_fgsea_deseqstat.csv"), row.names = FALSE)
+  fgseaRes.deseqstat %>% select(-leadingEdge) %>% write.csv2(file = file.path(source.output.dir, "pseudobulk_fgsea_deseqstat.csv"), row.names = FALSE)
 
-  leading_edge_df %>% write.csv2(file = paste0(source.output.dir, "/pseudobulk_fgsea_deseqstat_leadingedge.csv"), row.names = FALSE)
+  leading_edge_df %>% write.csv2(file = file.path(source.output.dir, "pseudobulk_fgsea_deseqstat_leadingedge.csv"), row.names = FALSE)
   }
 ```
 
@@ -465,7 +473,7 @@ if(export){
 # Wald stat
 CIN_fc_rnk.deseqstatscore <- df.deseq.pseudobulk.Waldscore %>% select(gene, stat) %>% deframe()
  
-# fgseaRes.deseqstat <- read.csv2(file = paste0(source.output.dir, "/scRNA_fgsea_CIN_highlow.csv"))
+# fgseaRes.deseqstat <- read.csv2(file = file.path(source.output.dir, "scRNA_fgsea_CIN_highlow.csv"))
 
 fgseaRes.scoredeseqstat <- fgsea(pathways = msigdb_hallmarks_set,
                   stats    = CIN_fc_rnk.deseqstatscore,
@@ -479,6 +487,7 @@ fgseaRes.scoredeseqstat <- fgseaRes.scoredeseqstat %>% mutate(within_threshold =
 
 fgseaRes.scoredeseqstat %>% select(NES, padj) %>% summary()
 
+# Plot results
 fgseaRes.scoredeseqstat %>% mutate(padj = ifelse(padj < 0.0001, 0.000101, padj)) %>% ggplot(aes(x = log10(padj), y = NES)) +
   geom_point(aes(size = 0.5, alpha = 0.3, col = Enriched_in)) + 
   geom_hline(yintercept = 0, col = "black") +
@@ -502,13 +511,13 @@ for (i in 1:length(leading_edge$leadingEdge)){
 }
 
 if (export){
-ggsave(file = paste0(source.output.dir, "/fGSEA_pseudobulk_scoredeseqstat.png"), width=8, height=5, dpi=300)
+ggsave(file = file.path(source.output.dir, "fGSEA_pseudobulk_scoredeseqstat.png"), width=8, height=5, dpi=300)
 }
 
 if(export){
-  fgseaRes.scoredeseqstat %>% select(-leadingEdge) %>% write.csv2(file = paste0(source.output.dir, "/pseudobulk_fgsea_scoredeseqstat.csv"), row.names = FALSE)
+  fgseaRes.scoredeseqstat %>% select(-leadingEdge) %>% write.csv2(file = file.path(source.output.dir, "pseudobulk_fgsea_scoredeseqstat.csv"), row.names = FALSE)
 
-  leading_edge_df %>% write.csv2(file = paste0(source.output.dir, "/pseudobulk_fgsea_scoredeseqstat_leadingedge.csv"), row.names = FALSE)
+  leading_edge_df %>% write.csv2(file = file.path(source.output.dir, "pseudobulk_fgsea_scoredeseqstat_leadingedge.csv"), row.names = FALSE)
   }
 ```
 # sessionInfo - Package Versions

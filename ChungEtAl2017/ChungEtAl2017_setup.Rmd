@@ -1,5 +1,5 @@
 ---
-title: "Lee et al 2020 scRNA-seq"
+title: "Chung et al 2017 scRNA-seq"
 author: "Pedro Batista Tan"
 date: "`r strftime(Sys.Date(), '%B %d %Y')`"
 output: 
@@ -24,7 +24,7 @@ library(AnnotationDbi)
 library(org.Hs.eg.db)
 library(plotly)
 
-source(paste0(dirname(getwd()), "/Helper_functions.R"))
+source(file.path(dirname(getwd()), "Helper_functions.R"))
 
 select = dplyr::select
 
@@ -66,7 +66,7 @@ summary(sample_metadata %>% mutate_if(is.character, as.factor))
 ```
 # Map ensembl IDs to gene symbols
 ```{r}
-gene_features <- read.csv2(file = paste0(dirname(getwd()), "/biomaRt_gene_features.csv"))
+gene_features <- read.csv2(file = file.path(dirname(getwd()), "biomaRt_gene_features.csv"))
 
 gene_map <- genes %>% rename("ensembl_gene_id" = "V1") %>% left_join(gene_features %>% select(ensembl_gene_id, hgnc_symbol) %>% unique()) %>% unique()
 
@@ -163,12 +163,12 @@ Seurat_object@meta.data <- Seurat_object@meta.data %>% rownames_to_column("Assay
 rm(design, study_metadata)
 ```
 
-```{r Export}
+```{r}
 if(export){
-saveRDS(Seurat_object, file = paste0(source.output.dir, "/Seurat_object_pre.rds"))
+saveRDS(Seurat_object, file = file.path(source.output.dir, "Seurat_object_pre.rds"))
 }
 
-Seurat_object <- readRDS(file = paste0(source.output.dir, "/Seurat_object_pre.rds"))
+Seurat_object <- readRDS(file = file.path(source.output.dir, "Seurat_object_pre.rds"))
 ```
 
 # Inspecting dataset, QC plots
@@ -263,10 +263,10 @@ ref_group_names %>% write.csv2(file = "ref_group_names.csv", row.names = FALSE)
 # Export
 ```{r Export}
 if(export){
-saveRDS(Seurat_object, file = paste0(source.output.dir, "/Seurat_object.rds"))
+saveRDS(Seurat_object, file = file.path(source.output.dir, "Seurat_object.rds"))
 }
 
-# Seurat_object <- readRDS(file = paste0(source.output.dir, "/Seurat_object.rds"))
+# Seurat_object <- readRDS(file = file.path(source.output.dir, "Seurat_object.rds"))
 ```
 
 # sessionInfo - Package Versions

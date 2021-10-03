@@ -1,0 +1,153 @@
+---
+title: "Bakhoum et al 2018 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+    export: TRUE
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("Seurat")
+# install.packages("sparseMatrixStats")
+library(Seurat)
+library(sparseMatrixStats)
+# install.packages("tidyverse")
+library(tidyverse)
+library(readxl)
+
+select = dplyr::select
+
+```
+
+# Setup
+```{r Setup}
+export = params$export
+
+# generate output dir path named data
+source.output.dir <- file.path("output_sc")
+
+Seurat_object_name <- "scSun"
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+} else{
+  print("Output folder already exists")
+}
+```
+
+# Loading data
+```{r}
+expression_data = read.table(file = "data/HCC_log_tpm_expression_matrix.txt", header = TRUE)
+
+metadata = read.table(file = "data/HCC_cell_metadata.txt", header = TRUE, sep = "\t")
+
+metadata = metadata[2:16499, ] # Remove second line - alternative header
+
+patient_metadata <- read_excel("data/1-s2.0-S0092867420316135-mmc1.xlsx", skip = 1)
+
+cell_fractions <- read_excel("data/1-s2.0-S0092867420316135-mmc2.xlsx", skip = 1)
+
+```
+
+```{r}
+expression_data[1:5, 1:5]
+head(metadata)
+head(patient_metadata)
+
+summary(metadata %>% mutate_if(is.character, as.factor))
+```
+
+```{r}
+Seurat_object <- CreateSeuratObject(counts = expression_data %>% column_to_rownames("gene"), project = "SunEtAl2020")
+
+Seurat_object@meta.data <- Seurat_object@meta.data %>% rownames_to_column("name") %>% left_join(metadata, by = "name") %>% column_to_rownames("name")
+
+```
+
+# Inspecting dataset, QC plots
+```{r}
+# Check whether mitochondrial genes are present in the samples
+str_detect(rownames(Seurat_object), "^MT-") %>% sum()
+```
+
+```{r}
+# Compute the % of mitochondrial counts
+Seurat_object[["percent.mt"]] <- PercentageFeatureSet(Seurat_object, pattern = "^MT-") %>% mutate_all(~replace(., is.na(.), 0))
+```
+
+```{r}
+# QC plots based on number of counts, features and % of mitochondrial genes
+VlnPlot(Seurat_object, features = c("nFeature_RNA"))
+VlnPlot(Seurat_object, features = c("nCount_RNA"))
+VlnPlot(Seurat_object, features = c("percent.mt"))
+
+FeatureScatter(Seurat_object, feature1 = "nCount_RNA", feature2 = "percent.mt") +
+FeatureScatter(Seurat_object, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+Seurat_object@meta.data %>% select(nCount_RNA, nFeature_RNA, percent.mt) %>% summary()
+
+```
+# Edit metadata
+```{r}
+colnames(Seurat_object[[]])
+table(Seurat_object$orig.ident)
+
+Seurat_object@meta.data <- Seurat_object[[]] %>% mutate(Project = "SunEtAl2020", Sample = orig.ident) %>% rename(Cell_type = cell_type)
+```
+
+## Annotation for inferCNV
+```{r}
+annot_scRNA <- Seurat_object@meta.data  %>% select(Cell_type, orig.ident) %>% mutate(
+  Cell_class = ifelse(str_detect(Cell_type, "Tumor"), "tumor", Cell_type),
+  annotation = ifelse(Cell_class == "tumor", paste0(Cell_class, "_", orig.ident), Cell_class))
+
+Seurat_object@meta.data$Cell_class <- annot_scRNA$Cell_class
+Seurat_object@meta.data$annotation <- annot_scRNA$annotation
+
+table(annot_scRNA$annotation)
+
+
+table(annot_scRNA$annotation) %>% as.data.frame() %>% mutate_if(is.factor, as.character) %>% filter(startsWith(Var1, "tumor") | Var1 %in% c("C23_HSC", "C18_Epi.", "C17_Endo.")) %>% ggplot(aes(x = Var1, y = Freq)) + geom_point() + coord_flip() + geom_hline(yintercept = 50)
+
+filter <- table(annot_scRNA$annotation) %>% as.data.frame() %>% mutate_if(is.factor, as.character) %>% filter(startsWith(Var1, "tumor")) %>% filter(Freq > 40) %>% rbind(
+  table(annot_scRNA$annotation) %>% as.data.frame() %>% mutate_if(is.factor, as.character) %>% filter(Var1 %in% c("C23_HSC", "C18_Epi.", "C17_Endo."))
+)
+
+# Write annotations file
+Seurat_object@meta.data %>% filter(annotation %in% filter$Var1 | annotation %in% c("C23_HSC", "C18_Epi.", "C17_Endo.")) %>% select(annotation) %>% rownames_to_column("sample_id") %>% write.table(file = "cellAnnotations.txt", sep = "\t", row.names = FALSE, col.names = FALSE)
+
+ref_group_names <- Seurat_object@meta.data %>% select(annotation) %>% unique() %>% filter(annotation %in% c("C23_HSC", "C18_Epi.", "C17_Endo."))
+
+ref_group_names %>% write.csv2(file = "ref_group_names.csv", row.names = FALSE)
+```
+
+# Export
+```{r}
+if(export){
+saveRDS(Seurat_object, file = file.path(source.output.dir, "Seurat_object.rds"))
+}
+
+Seurat_object <- readRDS(file = file.path(source.output.dir, "Seurat_object.rds"))
+
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+# packageVersion("DESeq2")
+# packinfo <- installed.packages(fields = c("Package", "Version"))
+# packinfo[,c("Package", "Version")]
+# packinfo["graphics",c("Package", "Version")]
+
+```
+

@@ -1,0 +1,358 @@
+---
+title: "Darmanis et al 2017 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  export: TRUE
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = TRUE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+#BiocManager::install("fgsea", "GO.db", "GOstats", "org.Hs.eg.db", "glmGamPoi", "DESeq2", "GGally")
+
+# install.packages("Seurat", "patchwork", "ggrepel", "sparseMatrixStats", "msigdbr", "tidyverse", "proxy", "plotly", "pheatmap", "gplots")
+
+library(Seurat)
+library(patchwork)
+library(ggrepel)
+library(sparseMatrixStats)
+library(msigdbr)
+library(org.Hs.eg.db)
+library(tidyverse)
+library(proxy)
+library(plotly)
+library(pheatmap)
+library(gplots)
+library(GGally)
+
+source("Helper_functions.R")
+
+set.seed(42)
+select = dplyr::select
+rename = dplyr::rename
+```
+
+# Setup
+```{r}
+CIN_signature <- c('PELI2','BMP2','SHH','TNS4','RAB3B','ROBO1','ARHGAP28','CHN2','CST1','F13A1','CPVL','SEMA6D','NHSL2','GTF2IP7','DPYSL3','PCDH7','KHDRBS3','TRAC','TMEM156', 'CST4','CD24','FGF5','NTN4')
+
+export = params$export
+
+# generate output dir path named data
+source.output.dir <- file.path("df_comparisons")
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+} else{
+  print("Output folder already exists")
+}
+```
+
+# Loading data
+```{r}
+datatype = "pseudobulk_fgsea_deseqstat.csv"
+
+# Read Bakhoum data to format dataframes
+BakhoumEtAl2018 <- read_csv2(file.path("BakhoumEtAl2018", "output_DE", datatype))
+
+BakhoumEtAl2018metrics <- read_csv2(file.path("BakhoumEtAl2018", "output_cnv", "karyotype_metrics.csv")) %>% mutate(dataset = "BakhoumEtAl2018")
+
+CIN_assignment <- read_csv2(file.path("BakhoumEtAl2018", "output_cnv", "CNV_metrics_CIN_assignment.csv")) %>% mutate(dataset = "BakhoumEtAl2018")
+
+BakhoumEtAl2018metrics <- BakhoumEtAl2018metrics %>% left_join(CIN_assignment %>% select(group, CIN_status, dataset))
+
+# Format dataframes according to Bakhoum df
+fgsea_data <- setNames(data.frame(matrix(ncol = ncol(BakhoumEtAl2018) + 1, nrow = 0)), c(colnames(BakhoumEtAl2018), "dataset"))
+
+karyotype_scores <- setNames(data.frame(matrix(ncol = ncol(BakhoumEtAl2018metrics), nrow = 0)), colnames(BakhoumEtAl2018metrics))
+  
+rm(BakhoumEtAl2018, BakhoumEtAl2018metrics)
+
+# Load each dataset, appending data
+dataset_list <- c("LeeEtAl2020", "NelsonEtAl2020", "BakhoumEtAl2018", "ChungEtAl2017", "DarmanisEtAl2017", "GiustacchiniEtAl2017", "KaraayvazEtAl2018", "SunEtAl2020", "TijhuisEtAl202X", "TiroshEtAl2016", "PuramEtAl2017")
+
+for(dataset_name in dataset_list){
+  print(dataset_name)
+  fgsea <- read_csv2(file.path(dataset_name, "output_DE", datatype)) %>% mutate(dataset = dataset_name)
+  
+  metrics <- read_csv2(file.path(dataset_name, "output_cnv", "karyotype_metrics.csv")) %>% mutate(dataset = dataset_name)
+  
+  CIN_assignment <- read_csv2(file.path(dataset_name, "output_cnv", "CNV_metrics_CIN_assignment.csv")) %>% mutate(dataset = dataset_name)
+  
+  metrics <- metrics %>%  left_join(CIN_assignment %>% select(group, CIN_status, dataset))
+  
+  fgsea_data <- rbind(fgsea_data, fgsea)
+  karyotype_scores <- rbind(karyotype_scores, metrics)
+  
+  rm(fgsea, metrics)
+}
+
+# Remove samples that were not assigned to a CIN_status
+# e.g. non tumor samples
+karyotype_scores <- karyotype_scores %>% filter(!is.na(CIN_status))
+```
+
+```{r}
+# karyotype_scores %>% ggplot(aes(x = heterogeneity_score, y = aneuploidy_score, col = dataset)) + geom_point()  +  
+# geom_text_repel(
+#   aes(x = heterogeneity_score, y = aneuploidy_score, label = group), data = karyotype_scores, colour = "grey20", min.segment.length = 0, max.overlaps = 20
+#   ) 
+
+# Plot the distribution of Karyotype scores
+karyotype_scores %>% 
+  left_join(
+  karyotype_scores %>% group_by(dataset) %>% summarize(n_samples = n()), by = "dataset") %>%
+  mutate(dataset = paste0(dataset , "(", as.character(n_samples), ")")) %>% 
+  ggplot(aes(x = heterogeneity_score, y = aneuploidy_score, col = dataset, shape = CIN_status)) + 
+  geom_point() +
+  labs(x = "Heterogeneity Score", y = "Aneuploidy Score") +
+  guides(col=guide_legend(ncol=2,  order = 1), 
+         shape = guide_legend(order = 2))
+
+ggsave(file = file.path(source.output.dir, "karyotype_scores.png"), width=8, height=4, dpi=300)
+
+cor(karyotype_scores$aneuploidy_score, karyotype_scores$heterogeneity_score)
+```
+
+# Compare Bakhoum and Tijhuis
+## Scores
+```{r}
+knitr::include_graphics(file.path("BakhoumEtAl2018", "output_cnv", "/infer_cnv_reorder.png"))
+
+knitr::include_graphics(file.path("BakhoumEtAl2018", "output_cnv", "/karyotype_metrics.png"))
+
+knitr::include_graphics(file.path("TijhuisEtAl202X", "output_cnv", "/infer_cnv_reorder.png"))
+
+knitr::include_graphics(file.path("TijhuisEtAl202X", "output_cnv", "/karyotype_metrics.png"))
+
+
+for (dataset_name in c("BakhoumEtAl2018", "TijhuisEtAl202X")) {
+  scores <- karyotype_scores %>% filter(dataset == dataset_name) 
+  
+  scores %>%
+  ggplot(aes(x = heterogeneity_score, y = aneuploidy_score, col = CIN_status)) + 
+  geom_point() + 
+  geom_text_repel(aes(x = heterogeneity_score, y  = aneuploidy_score, label = group), show.legend=FALSE) + 
+  xlim(0,  max(scores$heterogeneity_score) + 0.05) + 
+  ylim(0, max(scores$aneuploidy_score) + 0.01) + 
+  labs(x = "Heterogeneity Score", y = "Aneuploidy Score")
+ 
+  ggsave(file = file.path(source.output.dir, paste0(dataset_name, "_scores.png")), width=4, height=2, dpi=300)
+}
+```
+
+## fGSEA
+```{r}
+# Join Bakhoum and Tijhuis fgsea data
+fGSEA_comp <- fgsea_data %>% filter(dataset %in% c("BakhoumEtAl2018")) %>%
+  left_join(
+  fgsea_data %>% filter(dataset %in% c("TijhuisEtAl202X")) %>% select(-c(pathway))
+  , by = "name", suffix = c(".bakhoum",".tijhuis")) %>% 
+  mutate(sign_agreement = sign(NES.bakhoum) == sign(NES.tijhuis))
+
+# Plot NES value of Bakhoum x Tijhuis
+fGSEA_comp %>% 
+  ggplot(aes(x = NES.bakhoum, y = NES.tijhuis, col = log10(padj.bakhoum+1e-300), shape = padj.bakhoum < 0.2)) +
+  geom_point() + 
+  geom_abline(slope = 1) + 
+  geom_text_repel(
+    aes(x = NES.bakhoum, y = NES.tijhuis, label = name), data = fGSEA_comp %>% filter(!sign_agreement & (padj.bakhoum < 0.01 | padj.tijhuis < 0.01) | name %in% c("EMT", "Inflammatory Response", "IFN-a Response", "IFN-y Response", "TNF-a Signaling via NKFB", "IL2-STAT5 Signaling", "KRAS Signaling Up")), colour = "grey20", force = 3, force_pull = 2, min.segment.length = 0, max.overlaps = 20) + 
+  labs(x = "Bakhoum fGSEA NES", y = "Tijhuis fGSEA NES", color = "log10(FDRq)", shape = "FDRq < 0.2") +
+  scale_color_gradient2(low="black", mid = "blue", high="red", midpoint = -2)
+
+ggsave(file = file.path(source.output.dir, "BakhoumxTijhuis_NES.png"), width=5, height=3.5, dpi=300)
+```
+
+# Load msigdb hallmarks gene set
+```{r Load msigdb hallmarks}
+msigdb_hallmarks_set <- read.csv2(file = "msigdb_hallmarks_set.csv")
+msigdb_hallmarks_set <- split(msigdb_hallmarks_set$gene_symbol, msigdb_hallmarks_set$gs_name)
+msigdb_hallmarks_names <- read.csv2(file = "names_hallmarks.csv")
+```
+
+# Plot hallmarks
+```{r}
+pathways <- c("TNF-a Signaling via NKFB", "IFN-a Response", "IFN-y Response" ,"IL2-STAT5 Signaling" ,"EMT" ,"Inflammatory Response", "KRAS Signaling Up")
+
+dir.create(file.path(source.output.dir, "Hallmark_pathways"))
+
+# c("TNF-a Signaling via NKFB")
+for (hallmark in pathways){
+  print(hallmark)
+  lim <- max(max(-log10(fgsea_data %>% filter(name == hallmark) %>% select(padj))) + 0.5, 4)
+  
+  fig <- fgsea_data %>% filter(name == hallmark) %>% ggplot(aes(x = NES, y = -log10(padj), col = dataset)) + geom_point() + geom_hline(yintercept = 2, col = "black", alpha = 0.5, linetype = "dashed") +  
+geom_vline(xintercept = 0, col = "black", alpha = 0.5, linetype = "dashed") + 
+geom_text_repel(
+  aes(x = NES, y = -log10(padj + 1e-300), label = dataset), data = fgsea_data %>% filter(name == hallmark) , colour = "grey20", min.segment.length = 0, max.overlaps = 20
+  ) +
+  theme(plot.title = element_text(hjust= 0.5), legend.position = "none") +
+  labs(title = hallmark, x = "NES", y = "-log10(FDRq)") + ylim(0, lim)
+  print(fig)
+  rm(fig, lim) 
+}
+
+```
+
+```{r}
+# Save plots for all hallmark gene sets
+for (hallmark in unique(fgsea_data$name)){ # 
+  print(hallmark)
+  lim <- max(max(-log10(fgsea_data %>% filter(name == hallmark) %>% select(padj))) + 0.5, 4)
+  
+  fig <- fgsea_data %>% filter(name == hallmark) %>% ggplot(aes(x = NES, y = -log10(padj), col = dataset)) + geom_point() + geom_hline(yintercept = 2, col = "black", alpha = 0.5, linetype = "dashed") +  
+  geom_vline(xintercept = 0, col = "black", alpha = 0.5, linetype = "dashed") + geom_text_repel(
+  aes(x = NES, y = -log10(padj + 1e-300), label = dataset), data = fgsea_data %>% filter(name == hallmark) , colour = "grey20", min.segment.length = 0, max.overlaps = 20
+  ) +
+  theme(plot.title = element_text(hjust= 0.5), legend.position = "none") +
+  labs(title = hallmark, x = "NES", y = "-log10(FDRq)") + ylim(0, lim)
+  print(fig)
+  
+  ggsave(fig, file = file.path(source.output.dir, "Hallmark_pathways", paste0(hallmark, ".png")),  width=4, height=4, dpi=300)
+  rm(fig, lim) 
+
+}
+```
+# NES tests
+```{r}
+# Get p-value from a one sample t test
+get_os_t_test_pval = function(x){
+  t_res <- t.test(x, mu = 0)
+  return(t_res$p.value)
+}
+
+# For each gene set, perform one sample t-tests of the NES across datasets versus the mean of zero, then apply FDR correction
+NES_tests <- fgsea_data %>%
+  group_by(pathway, name) %>% 
+  summarize(
+    mean_NES = mean(NES), 
+    pval = get_os_t_test_pval(NES)
+    ) %>% ungroup() %>% 
+  mutate(padj = p.adjust(pval, method = "fdr")) %>%
+  arrange(mean_NES) 
+
+```
+
+# Heatmap datasets and HALLMARK NES
+```{r}
+colfunc <- colorRampPalette(c("blue", "white", "red"))
+
+# Pheatmap
+fgsea_data %>% select(name, NES, dataset) %>% pivot_wider(values_from = NES, names_from = name) %>% column_to_rownames("dataset") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix() %>% pheatmap(color = colfunc(10))
+
+# Save plot
+NESpheatmap <- fgsea_data %>% select(name, NES, dataset) %>% pivot_wider(values_from = NES, names_from = name) %>% column_to_rownames("dataset") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix() %>% pheatmap(color = colfunc(10))
+
+save_pheatmap_png(NESpheatmap, filename = file.path(source.output.dir, "NES_pheatmap.png"), width=3000, height=1500)
+
+# Heatmap.2 plot
+NESheatmap <- fgsea_data %>% left_join(msigdb_hallmarks_names) %>% select(name, NES, dataset) %>% pivot_wider(values_from = NES, names_from = name) %>% 
+  column_to_rownames(var = "dataset") %>% mutate_all(~replace(., is.na(.), 0)) %>% as.matrix() %>%
+  heatmap.2(col=colfunc(10), dendrogram = "both", trace = "none", srtCol = 75)
+
+```
+## geom_tile
+```{r}
+colfunc <- colorRampPalette(c("blue", "white", "red"))
+
+# Heatmap using geom_tile
+fgsea_data %>% ggplot(
+  aes(y = dataset, x = name, fill = NES)
+  ) + geom_tile()  + 
+  geom_point(aes(size=ifelse(padj < 0.2, "dot", "no_dot"))) + 
+   scale_size_manual(values=c(dot=0.5, no_dot=NA), guide="none") +
+  scale_fill_gradient2(low="blue", mid= "white", high="red", midpoint = 0)  +
+  labs(title = "", x = "", y = "Dataset") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+ggsave(file = file.path(source.output.dir, "NES_heatmap.png"), width=8, height=4, dpi=300)
+```
+
+## geom_tile mean
+```{r}
+
+# Restructure containing the data with NES means and t-tests.
+# Columns are renamed to be added to the larger fgsea df
+NES_tests_df <- NES_tests %>% mutate(
+  NES = mean_NES, 
+  dataset = "NES dataset mean", 
+  ES = "NA", size = "NA", log2err = "NA",
+  within_threshold = pval < 0.1,
+  Enriched_in = ifelse(NES > 0, "CIN-high", "CIN-low")) %>%
+  select(-mean_NES)
+
+# Get pheatmap HC order
+pheatmap_hc_order <- NESpheatmap$tree_row$labels[NESpheatmap$tree_row$order]
+
+# Append NES mean data
+fgsea_data_mean <- fgsea_data
+fgsea_data_mean <- fgsea_data_mean %>% 
+  rbind(NES_tests_df[, colnames(fgsea_data_mean)])
+
+# Convert the name column to a factor, with levels reordered by NES tests order (ascending mean NES)
+fgsea_data_mean$name <- factor(as.character(fgsea_data_mean$name), levels = NES_tests$name)
+
+# Convert the dataset column to a factor, with levels reordered by the pheatmap HC, and with the mean NES row first
+fgsea_data_mean$dataset <- factor(as.character(fgsea_data_mean$dataset), levels = rev(c("NES dataset mean", pheatmap_hc_order)))
+
+# Plot heatmapt with geom_tile
+fgsea_data_mean %>% ggplot(
+  aes(y = dataset, x = name, fill = NES)
+  ) + geom_tile()  + 
+  geom_point(aes(size=ifelse(padj < 0.2, "dot", "no_dot"))) + 
+  geom_point(aes(size=ifelse(dataset == "NES dataset mean" & pval < 0.2, "dot", "no_dot"), shape = "2", show_guide = FALSE)) +
+   scale_size_manual(values=c(dot=0.5, no_dot=NA), guide="none") +
+  scale_fill_gradient2(low="blue", mid= "white", high="red", midpoint = 0)  +
+  labs(title = "", x = "", y = "Dataset") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  guides(size=FALSE, shape = FALSE)
+
+ggsave(file = file.path(source.output.dir, "NES_heatmap.png"), width=8, height=4, dpi=300)
+```
+
+```{r}
+# Plot distribution of NES values, and distinguish the mean value
+fgsea_data_mean %>%
+  ggplot(aes(x = name, y = NES, col = dataset, shape = dataset == "NES dataset mean")) +
+  geom_point(alpha = 0.75) + 
+  theme(axis.text.x = element_text(angle = 90)) + 
+  guides(shape = FALSE, color = guide_legend(ncol = 2))
+
+fgsea_data_mean %>%
+  ggplot(aes(x = name, y = NES, col = dataset, shape = dataset == "NES dataset mean")) +
+  geom_point(alpha = 0.75) + 
+  geom_hline(yintercept = 0, col = "black", alpha= 0.5) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = "") +
+  geom_text(aes(label=ifelse(dataset == "NES dataset mean", round(pval, 3), NA), y = 3.5, angle = 90, show.legend=FALSE, size = 0.1), color = "black") + 
+  guides(shape = FALSE, color = guide_legend(ncol = 2), size= FALSE) + ylim(-3, 4)
+
+ggsave(file = file.path(source.output.dir, "NES_distribution.png"), width=11, height=4, dpi=300)
+```
+
+```{r}
+# fgsea_data %>% select(NES, pathway, dataset) %>% pivot_wider(names_from = pathway, values_from = NES) %>% select(-dataset) %>% ggpairs(
+#   lower = list(continuous = wrap("points", alpha = 0.3, size = 0.5))
+# )
+
+# Check correlation between selected pathways using ggpairs
+fgsea_data %>% select(NES, name, dataset) %>% filter(name %in% pathways) %>% pivot_wider(names_from = name, values_from = NES) %>% select(-dataset) %>% ggpairs(
+  lower = list(continuous = wrap("points", alpha = 0.3, size = 0.5))
+)
+
+ggsave(file = file.path(source.output.dir, "NES_ggpairs"), width=10, height=10, dpi=300)
+
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+```

@@ -39,11 +39,9 @@ rm(all_gene_sets)
 # msigdb_hallmarks <- gmtPathways("data/h.all.v7.4.symbols.gmt")
 # msigdb_hallmarks %>% head() %>% lapply(head)
 
-```
-
-## Export
-```{r}
+# Export
 msigdb_hallmarks_set %>% write_csv2("msigdb_hallmarks_set.csv")
+
 ```
 
 # Mouse
@@ -54,16 +52,10 @@ all_gene_sets_mouse <- msigdbr("Mus musculus")
 msigdb_hallmarks_set_mouse <- filter(all_gene_sets_mouse, gs_cat == "H") %>% select(gs_name, gene_symbol)
 
 rm(all_gene_sets_mouse)
-# Another option is loading files with gene sets
-# msigdb_hallmarks <- gmtPathways("data/h.all.v7.4.symbols.gmt")
-# msigdb_hallmarks %>% head() %>% lapply(head)
 
-
-```
-
-## Export
-```{r}
+# Export
 msigdb_hallmarks_set_mouse %>% write_csv2("msigdb_hallmarks_set_mouse.csv")
+
 ```
 
 # Hallmark Names

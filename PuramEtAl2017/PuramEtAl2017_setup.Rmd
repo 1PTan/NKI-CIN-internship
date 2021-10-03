@@ -1,0 +1,258 @@
+---
+title: "Puram et al 2017 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  export: TRUE
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = FALSE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+#BiocManager::install("DropletUtils")
+# library(DropletUtils)
+# install.packages("Seurat", "sparseMatrixStats", "tidyverse")
+library(Seurat)
+library(sparseMatrixStats)
+library(tidyverse)
+library(readxl)
+library(plotly)
+library(GEOquery)
+
+source(file.path(dirname(getwd()), "Helper_functions.R"))
+
+select = dplyr::select
+rename = dplyr::rename
+```
+
+
+# Setup
+```{r Setup}
+export = params$export
+
+# generate output dir path named data
+source.output.dir <- file.path("output_sc")
+
+Seurat_object_name <- "scPuram"
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+} else{
+  print("Output folder already exists")
+}
+
+```
+
+# Loading data
+```{r}
+#GEO data
+raw_data <- read.table("data/GSE103322_HNSCC_all_data.txt", sep = "\t", header = TRUE)
+
+gse=getGEO(filename="data/GSE103322_series_matrix.txt.gz")
+
+GEO_metadata <- gse@phenoData@data
+```
+
+```{r}
+celltype_metadata <- raw_data[1:5, ] 
+
+# first remember the names
+names <- celltype_metadata[, 1]
+
+# transpose all but the first column (name)
+celltype_metadata <- as.data.frame(t(celltype_metadata[,-1]))
+colnames(celltype_metadata) <- names
+celltype_metadata$title <- factor(row.names(celltype_metadata))
+
+str(celltype_metadata) # Check the column types
+
+celltype_metadata %>% mutate_if(is.character, as.factor) %>% summary()
+
+```
+
+
+```{r}
+colnames(GEO_metadata)
+
+celltype_metadata$title %in% GEO_metadata$title %>% sum()
+
+
+metadata <- GEO_metadata %>% select(c(title, geo_accession, source_name_ch1, characteristics_ch1.1)) %>% left_join(celltype_metadata, by = "title")
+
+table(metadata$tumor, metadata$`malignant(1=no,2=yes,0=unresolved)`)
+```
+# Process expression matrix
+```{r}
+# one cell is not present in the GEO metadata
+celltype_metadata %>% filter(!title %in% GEO_metadata$title)
+
+# remove first rows of cell metadata, and the cell without metadata
+remove_index <- 1 + which(!celltype_metadata$title %in% GEO_metadata$title, arr.ind = T)
+data_df <- raw_data[6:23691, -remove_index]
+
+rownames(data_df) <- c()
+
+data_df <- data_df %>% rename(gene = X)
+
+colnames(data_df) %in% metadata$title %>% sum()
+
+# Check if genes have repeated entries
+duplicates <- table(data_df$gene) %>% as.data.frame() %>% rename("gene" = "Var1") %>% filter(Freq > 1)
+
+data_df %>% filter(gene %in% duplicates$gene) %>% nrow()
+
+# Summarize
+# data_df_duplicates = data_df[data_df$gene %in% duplicates$gene, ]
+
+# data_sum <- data_df_duplicates %>% group_by(gene) %>% summarize_at(colnames(data_df_duplicates)[!colnames(data_df_duplicates) %in% c("gene")], sum)
+  
+# rm(data_df_duplicates)
+# head(data_sum)
+```
+
+```{r}
+# Join summarized dataset
+# rownames(data_df) <- c()
+# rownames(data_sum) <- c()
+
+# Remove duplicated genes
+# data_df <- data_df[!data_df$gene %in% duplicates$gene,]
+
+# Add sum of duplicated genes
+# rownames(data_df) <- c()
+# data_df <- data_df %>% rbind(data_sum) %>% column_to_rownames("gene")
+```
+
+```{r}
+rownames(data_df) <- c()
+data_df <- data_df %>% column_to_rownames("gene")
+
+data = as.matrix(data_df)
+# rm(data_df, data_sum)
+
+data = as(data, "dgCMatrix")
+```
+
+```{r}
+Seurat_object = CreateSeuratObject(counts = data, project = "PuramEtAl2017")
+# rm(data)
+
+Seurat_object@meta.data <- Seurat_object@meta.data %>% rownames_to_column("title") %>% 
+  left_join(metadata, by="title") %>% 
+  column_to_rownames("title")
+
+# Seurat_object@meta.data
+table(Seurat_object@meta.data$orig.ident)
+table(Seurat_object@meta.data$`classified  as cancer cell`)
+
+table(Seurat_object@meta.data$orig.ident, Seurat_object@meta.data$`classified  as cancer cell`)
+table(Seurat_object@meta.data$orig.ident, Seurat_object@meta.data$`non-cancer cell type`)
+
+```
+
+# Inspecting dataset, QC plots
+```{r}
+# Check whether mitochondrial genes are present in the samples
+str_detect(rownames(Seurat_object), "^MT-") %>% sum()
+```
+
+```{r}
+# Compute the % of mitochondrial counts
+# Seurat_object[["percent.mt"]] <- PercentageFeatureSet(Seurat_object, pattern = "^MT-") %>% mutate_all(~replace(., is.na(.), 0))
+
+```
+
+```{r}
+Idents(Seurat_object) <- "orig.ident"
+
+# QC plots based on number of counts, features and % of mitochondrial genes
+VlnPlot(Seurat_object, features = c("nFeature_RNA"))
+VlnPlot(Seurat_object, features = c("nCount_RNA"))
+# VlnPlot(Seurat_object, features = c("percent.mt"))
+
+# FeatureScatter(Seurat_object, feature1 = "nCount_RNA", feature2 = "percent.mt")
+FeatureScatter(Seurat_object, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+Seurat_object@meta.data %>% select(nCount_RNA, nFeature_RNA) %>% summary()
+```
+
+# Filter datasets
+```{r}
+# Filter dataset based on # of features, counts and mitocondrial %
+# Seurat_object_f <- subset(Seurat_object, subset = nFeature_RNA > 200 & nCount_RNA > 1000)
+```
+
+```{r}
+# QC plots after filtering
+# VlnPlot(Seurat_object_f, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2)
+# FeatureScatter(Seurat_object_f, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+# 
+# Seurat_object_f@meta.data %>% select(nCount_RNA, nFeature_RNA) %>% summary()
+
+```
+
+```{r}
+# Seurat_object <- Seurat_object_f
+```
+
+# Edit metadata
+```{r}
+colnames(Seurat_object[[]])
+```
+
+```{r}
+Seurat_object@meta.data <- Seurat_object[[]] %>% mutate(Project = "PuramEtAl2017", Sample = orig.ident)
+```
+
+## Annotation for inferCNV
+```{r}
+annot_scRNA <- Seurat_object@meta.data %>% select(Sample, `classified  as cancer cell`, `non-cancer cell type`) %>% mutate(
+  Cell_class = ifelse(`classified  as cancer cell` == 1, "tumor", "non_tumor"),
+  annotation = ifelse(Cell_class == "tumor", paste0(Cell_class, "_", Sample), `non-cancer cell type`)
+  )
+
+table(annot_scRNA$annotation)
+table(annot_scRNA$Cell_class)
+annot_scRNA$annotation <- annot_scRNA$annotation %>% str_replace("-Fibroblast", "Fibroblast")
+
+Seurat_object@meta.data$annotation <- annot_scRNA$annotation
+Seurat_object@meta.data$Cell_class <- annot_scRNA$Cell_class
+
+
+table(annot_scRNA$annotation) %>% as.data.frame() %>% mutate_if(is.factor, as.character) %>% filter(str_detect(Var1, "tumor")) %>% ggplot(aes(x = Var1, y = Freq)) + geom_point() + coord_flip() + geom_hline(yintercept = 50)
+
+filter <- table(annot_scRNA$annotation) %>% as.data.frame() %>% mutate_if(is.factor, as.character) %>% filter(str_detect(Var1, "tumor") & Freq > 50 | Var1 %in% c("Fibroblast", "Endothelial")) 
+
+# Write annotations file
+Seurat_object@meta.data %>% filter(annotation %in% filter$Var1) %>% select(annotation) %>% rownames_to_column("sample_id") %>% write.table(file = "cellAnnotations.txt", sep = "\t", row.names = FALSE, col.names = FALSE)
+
+ref_group_names <- Seurat_object@meta.data %>% select(annotation) %>% unique() %>% filter(annotation %in% c("Fibroblast", "Endothelial"))
+
+ref_group_names %>% write.csv2(file = "ref_group_names.csv", row.names = FALSE)
+```
+
+# Export
+```{r}
+saveRDS(Seurat_object, file = file.path(source.output.dir, "Seurat_object.rds"))
+
+# Seurat_object <- readRDS(file = file.path(source.output.dir, "Seurat_object.rds"))
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+# packageVersion("DESeq2")
+# packinfo <- installed.packages(fields = c("Package", "Version"))
+# packinfo[,c("Package", "Version")]
+# packinfo["graphics",c("Package", "Version")]
+
+```

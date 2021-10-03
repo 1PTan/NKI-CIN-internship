@@ -1,0 +1,285 @@
+---
+title: "Tirosh et al 2016 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+  export: TRUE
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = FALSE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+#BiocManager::install("DropletUtils")
+# library(DropletUtils)
+# install.packages("Seurat", "sparseMatrixStats", "tidyverse")
+library(Seurat)
+library(sparseMatrixStats)
+library(tidyverse)
+library(readxl)
+library(plotly)
+library(GEOquery)
+source(file.path(dirname(getwd()), "Helper_functions.R"))
+
+select = dplyr::select
+rename = dplyr::rename
+```
+
+
+# Setup
+```{r Setup}
+export = params$export
+
+# generate output dir path named data
+source.output.dir <- file.path("output_sc")
+
+Seurat_object_name <- "scTirosh"
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+} else{
+  print("Output folder already exists")
+}
+
+```
+
+# Loading data
+```{r}
+#GEO data
+raw_data <- read.table("data/GSE72056_melanoma_single_cell_revised_v2.txt", sep = "\t", header = TRUE)
+
+gse=getGEO(filename="data/GSE72056_series_matrix.txt.gz")
+
+GEO_metadata <- gse@phenoData@data
+```
+
+```{r}
+celltype_metadata <- raw_data[1:3, ] 
+
+# first remember the names
+names <- celltype_metadata[, 1]
+
+# transpose all but the first column (name)
+celltype_metadata <- as.data.frame(t(celltype_metadata[,-1]))
+colnames(celltype_metadata) <- names
+celltype_metadata$title <- factor(row.names(celltype_metadata))
+
+str(celltype_metadata) # Check the column types
+
+celltype_metadata %>% mutate_if(is.numeric, as.factor) %>% summary()
+table(celltype_metadata$tumor, celltype_metadata$`malignant(1=no,2=yes,0=unresolved)`)
+
+```
+
+
+```{r}
+colnames(GEO_metadata)
+
+# cell ids have replaced dashes with dots
+celltype_metadata$title %in% GEO_metadata$title %>% sum()
+celltype_metadata$title  %in% str_replace_all(GEO_metadata$title, "-", ".") %>% sum()
+
+GEO_metadata <- GEO_metadata %>% mutate(orig.title = title)
+GEO_metadata$title <- str_replace_all(GEO_metadata$title, "-", ".")
+
+metadata <- GEO_metadata %>% select(c(title, geo_accession, source_name_ch1, characteristics_ch1)) %>% left_join(celltype_metadata, by = "title")
+
+table(metadata$tumor, metadata$`malignant(1=no,2=yes,0=unresolved)`)
+```
+# Process expression matrix
+```{r}
+# remove first rows, cell metadata
+data_df <- raw_data[4:23689,]
+rownames(data_df) <- c()
+
+data_df <- data_df %>% rename(gene = Cell)
+
+# Some genes have repeated entries, aggregate them
+duplicates <- table(data_df$gene) %>% as.data.frame() %>% rename("gene" = "Var1") %>% filter(Freq > 1)
+
+data_df %>% filter(gene %in% duplicates$gene)
+
+# Summarize
+data_df_duplicates = data_df[data_df$gene %in% duplicates$gene, ]
+
+data_sum <- data_df_duplicates %>% group_by(gene) %>% summarize_at(colnames(data_df_duplicates)[!colnames(data_df_duplicates) %in% c("gene")], sum)
+  
+rm(data_df_duplicates)
+head(data_sum)
+```
+
+```{r}
+# Join summarized dataset
+rownames(data_df) <- c()
+rownames(data_sum) <- c()
+
+# Remove duplicated genes
+data_df <- data_df[!data_df$gene %in% duplicates$gene,]
+
+# Add sum of duplicated genes
+rownames(data_df) <- c()
+data_df <- data_df %>% rbind(data_sum) %>% column_to_rownames("gene")
+```
+
+```{r}
+# cell ids have replaced dashes with dots
+colnames(data_df) %in% metadata$title %>% sum()
+colnames(data_df) %in% str_replace_all(metadata$title, "-", ".") %>% sum()
+
+metadata <- metadata %>% mutate(orig.title = title)
+metadata$title <- str_replace_all(metadata$title, "-", ".")
+
+colnames(data_df) %in% str_replace_all(GEO_metadata$title, "-", ".") %>% sum()
+celltype_metadata$title %in% GEO_metadata$title %>% sum()
+f <- celltype_metadata %>% filter(title %in% GEO_metadata$title)
+table(f$tumor)
+table(f$`malignant(1=no,2=yes,0=unresolved)`)
+table(f$`malignant(1=no,2=yes,0=unresolved)`, f$tumor)
+
+test <- colnames(raw_data) %>% as.data.frame() %>% cbind(c("Cell", as.character(str_replace_all(GEO_metadata$title, "-", ".") )))
+colnames(test) <- c("data","metadata")
+
+test <- test %>% mutate(equal = data == metadata)
+```
+
+```{r}
+data = as.matrix(data_df)
+# rm(data_df, data_sum)
+
+data = as(data, "dgCMatrix")
+```
+
+```{r}
+Seurat_object = CreateSeuratObject(counts = data, project = "TiroshEtAl2016")
+# rm(data)
+
+# Edit cell titles, replaced when creating Seurat object
+colnames(Seurat_object) %in% (metadata$title) %>% sum()
+
+colnames(Seurat_object) %in% metadata$title %>% sum()
+rownames(Seurat_object@meta.data) %in% metadata$title %>% sum()
+
+Seurat_object@meta.data <- Seurat_object@meta.data %>%   rownames_to_column("title") %>% 
+  left_join(metadata, by="title") %>% 
+  column_to_rownames("title")
+
+table(Seurat_object@meta.data$`malignant(1=no,2=yes,0=unresolved)`)
+table(Seurat_object@meta.data$tumor, Seurat_object@meta.data$`malignant(1=no,2=yes,0=unresolved)`)
+
+```
+
+# Inspecting dataset, QC plots
+```{r}
+# Check whether mitochondrial genes are present in the samples
+str_detect(rownames(Seurat_object), "^MT-") %>% sum()
+```
+
+```{r}
+# Compute the % of mitochondrial counts
+# Seurat_object[["percent.mt"]] <- PercentageFeatureSet(Seurat_object, pattern = "^MT-") %>% mutate_all(~replace(., is.na(.), 0))
+
+```
+
+```{r}
+Idents(Seurat_object) <- "tumor"
+
+# QC plots based on number of counts, features and % of mitochondrial genes
+VlnPlot(Seurat_object, features = c("nFeature_RNA"))
+VlnPlot(Seurat_object, features = c("nCount_RNA"))
+# VlnPlot(Seurat_object, features = c("percent.mt"))
+
+# FeatureScatter(Seurat_object, feature1 = "nCount_RNA", feature2 = "percent.mt")
+FeatureScatter(Seurat_object, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+Seurat_object@meta.data %>% select(nCount_RNA, nFeature_RNA) %>% summary()
+```
+
+# Filter datasets
+```{r}
+# Filter dataset based on # of features, counts and mitocondrial %
+# Seurat_object_f <- subset(Seurat_object, subset = nFeature_RNA > 200 & nCount_RNA > 1000)
+```
+
+```{r}
+# QC plots after filtering
+# VlnPlot(Seurat_object_f, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2)
+# FeatureScatter(Seurat_object_f, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+# 
+# Seurat_object_f@meta.data %>% select(nCount_RNA, nFeature_RNA) %>% summary()
+
+```
+
+```{r}
+# Seurat_object <- Seurat_object_f
+```
+
+# Edit metadata
+```{r}
+colnames(Seurat_object[[]])
+```
+
+```{r}
+Seurat_object@meta.data <- Seurat_object[[]] %>% mutate(Project = "TiroshEtAl2016", Sample = tumor)
+table(Seurat_object$Sample)
+
+```
+
+## Annotation for inferCNV
+```{r}
+annot_scRNA <- Seurat_object@meta.data %>% select(Sample, 'malignant(1=no,2=yes,0=unresolved)')
+
+annot_scRNA$`Sample` <- as.character(annot_scRNA$`Sample`)
+
+# annot_scRNA$`malignant(1=no,2=yes,0=unresolved)` <- as.character(annot_scRNA$`malignant(1=no,2=yes,0=unresolved)` )
+
+annot_scRNA <- Seurat_object@meta.data %>% select(Sample, 'malignant(1=no,2=yes,0=unresolved)') %>% mutate(
+  Cell_class = ifelse(`malignant(1=no,2=yes,0=unresolved)` == 0, "NA", 
+    ifelse(`malignant(1=no,2=yes,0=unresolved)` == 2, "tumor", "non_tumor")),
+  annotation = ifelse(Cell_class == "tumor", paste0(Cell_class, "_", Sample), Cell_class)
+  )
+
+table(annot_scRNA$annotation)
+table(annot_scRNA$Cell_class)
+
+Seurat_object@meta.data$annotation <- annot_scRNA$annotation
+Seurat_object@meta.data$Cell_class <- annot_scRNA$Cell_class
+
+
+table(annot_scRNA$annotation) %>% as.data.frame() %>% mutate_if(is.factor, as.character) %>% filter(!Var1 %in% c("non_tumor")) %>% ggplot(aes(x = Var1, y = Freq)) + geom_point() + coord_flip() + geom_hline(yintercept = 50)
+
+filter <- table(annot_scRNA$annotation) %>% as.data.frame() %>% mutate_if(is.factor, as.character) %>% filter(Freq > 50 & !Var1 %in% c("NA")) 
+
+# Write annotations file
+Seurat_object@meta.data %>% filter(annotation %in% filter$Var1) %>% select(annotation) %>% rownames_to_column("sample_id") %>% write.table(file = "cellAnnotations.txt", sep = "\t", row.names = FALSE, col.names = FALSE)
+
+ref_group_names <- Seurat_object@meta.data %>% select(annotation) %>% unique() %>% filter(annotation %in% c("non_tumor"))
+
+Seurat_object@meta.data %>% filter(annotation %in% c("non_tumor")) %>% select(`non-malignant cell type (1=T,2=B,3=Macro.4=Endo.,5=CAF;6=NK)`) %>% table()
+
+ref_group_names %>% write.csv2(file = "ref_group_names.csv", row.names = FALSE)
+```
+
+# Export
+```{r}
+saveRDS(Seurat_object, file = file.path(source.output.dir, "Seurat_object.rds"))
+
+# Seurat_object <- readRDS(file = file.path(source.output.dir, "Seurat_object.rds"))
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+# packageVersion("DESeq2")
+# packinfo <- installed.packages(fields = c("Package", "Version"))
+# packinfo[,c("Package", "Version")]
+# packinfo["graphics",c("Package", "Version")]
+Seurat_object
+```

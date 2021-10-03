@@ -62,6 +62,7 @@ gene_features.f$chromosome_name %>% unique()
 nrow(gene_features.f)
 gene_features.f$hgnc_symbol %>% n_distinct()
 ```
+
 InferCNV does not accept duplicated gene features. We are arbitrarily choosing one entry for genes with multiple entries that have (1) the first start position, then (2) the first end position
 
 ## Choose entries for duplicate symbols
@@ -77,7 +78,7 @@ gene_features.f <- gene_features.f %>% group_by(hgnc_symbol) %>% mutate(first_st
 duplicated <- gene_features.f %>% filter(hgnc_symbol %in% duplicated_genes)
 duplicated <- duplicated %>% filter(first_start)
 
-# Genes that still have duplication
+# Check genes that still have duplication
 duplicated_genes <- duplicated$hgnc_symbol[duplicated(duplicated$hgnc_symbol)]
 duplicated_genes
 
@@ -182,7 +183,6 @@ nrow(gene_features.f)
 ```{r}
 gene_features %>% write_csv2("biomaRt_gene_features_mouse.csv")
 gene_features.f %>% write_csv2("inferCNV_gene_features_mouse.csv")
-
 ```
 
 # sessionInfo - Package Versions

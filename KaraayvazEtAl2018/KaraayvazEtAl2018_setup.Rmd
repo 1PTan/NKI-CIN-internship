@@ -26,7 +26,7 @@ library(AnnotationDbi)
 library(org.Hs.eg.db)
 library(plotly)
 library(recount3)
-
+library(GEOquery)
 source(paste0(dirname(getwd()), "/Helper_functions.R"))
 
 select = dplyr::select
@@ -163,16 +163,6 @@ Seurat_object@meta.data <- Seurat_object[[]] %>% mutate(Project = "KaraayvazEtAl
 
 ## Annotation for inferCNV
 ```{r}
-annot_scRNA <- Seurat_object@meta.data %>% select(Cell_type, Sample) %>% mutate(
-  Cell_class = ifelse(str_detect(Cell_type, "epithelial"), "tumor", Cell_type),
-  annotation = ifelse(Cell_class == "tumor", paste0(Cell_class, "_", Sample), Cell_class))
-
-Seurat_object@meta.data$annotation <- annot_scRNA$annotation
-Seurat_object@meta.data$Cell_class <- annot_scRNA$Cell_class
-
-table(annot_scRNA$annotation)
-table(annot_scRNA$Cell_class)
-
 # Write annotations file
 Seurat_object@meta.data %>% select(annotation) %>% rownames_to_column("sample_id") %>% write.table(file = "cellAnnotations.txt", sep = "\t", row.names = FALSE, col.names = FALSE)
 

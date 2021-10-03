@@ -1,0 +1,264 @@
+---
+title: "Giustacchini et al 2017 scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+params:
+    export: TRUE
+---
+# Loading Packages
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = FALSE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+# BiocManager::install("DropletUtils", "org.Hs.eg.db")
+# install.packages("Seurat", "sparseMatrixStats", "tidyverse")
+library(Seurat)
+library(sparseMatrixStats)
+library(tidyverse)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(plotly)
+
+source(file.path(dirname(getwd()), "Helper_functions.R"))
+
+select = dplyr::select
+
+```
+
+# Setup
+```{r Setup}
+export = params$export
+
+# generate output dir path named data
+source.output.dir <- file.path("output_sc")
+
+Seurat_object_name <- "scGiustacchini"
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+} else{
+  print("Output folder already exists")
+}
+```
+
+# Loading data
+```{r}
+barcodes <- read.table("data/E-GEOD-76312.aggregated_filtered_counts.mtx_cols")
+
+genes <- read.table("data/E-GEOD-76312.aggregated_filtered_counts.mtx_rows")
+# matrix <- read.table("data/E-MTAB-8410.aggregated_filtered_counts.mtx", sep = "\ ", header = TRUE, fill = TRUE)
+
+matrix <- read.table("data/E-GEOD-76312.aggregated_filtered_counts.mtx", sep = "\ ", skip = 2)
+
+design <- read.table("data/ExpDesign-E-GEOD-76312.tsv", sep = "\t", header = TRUE)
+
+study_metadata = read.table(file = "data/E-GEOD-76312.sdrf.txt", header = TRUE, sep = "\t")
+
+summary(design %>% mutate_if(is.character, as.factor))
+```
+
+```{r}
+table(design$Sample.Characteristic.individual., design$Sample.Characteristic.clinical.information.)
+```
+
+# Map ensembl IDs to gene symbols
+```{r}
+gene_features <- read.csv2(file = file.path(dirname(getwd()), "biomaRt_gene_features.csv"))
+
+gene_map <- genes %>% select(-V2) %>% rename("ensembl_gene_id" = "V1") %>% left_join(gene_features %>% select(ensembl_gene_id, hgnc_symbol)) %>% unique()
+
+# There is an ID with 2 associated symbols 
+gene_map %>% select(ensembl_gene_id) %>% table() %>% as.data.frame() %>% filter(Freq > 1)
+
+gene_map %>% filter(ensembl_gene_id == "ENSG00000276085")
+
+# Choose one of the symbols CCL3L1
+gene_map <- gene_map %>% filter(!hgnc_symbol %in% c("CCL3L3"))
+
+gene_map %>% filter(is.na(hgnc_symbol)) %>% nrow()
+gene_map %>% filter(hgnc_symbol == "") %>% nrow()
+
+gene_map_f <- gene_map %>% filter(!is.na(hgnc_symbol)) %>% filter(hgnc_symbol != "")
+```
+
+```{r}
+# Export features and barcodes to import with Read10x function
+# dir.create("data/data_10x_format")
+
+# write.table(genes, file = "data/data_10x_format/features.tsv", row.names=FALSE, sep="\t", col.names = FALSE, quote = FALSE)
+# write.table(barcodes, file = "data/data_10x_format/barcodes.tsv", row.names=FALSE, sep="\t", col.names  = FALSE , quote = FALSE)
+rm(barcodes, genes, matrix)
+```
+
+# Aggregate counts for duplicate symbols
+```{r}
+# Get genes with duplicate symbols
+duplicates <- table(gene_map_f$hgnc_symbol) %>% as.data.frame() %>% rename("hgnc_symbol" = "Var1") %>% filter(Freq > 1) %>% inner_join(gene_map_f)
+```
+```{r}
+# data <- ReadMtx(mtx = expression_matrix, cells = barcodes, features = genes)
+data_dir <- "data/data_10x_format"
+list.files(data_dir) # Should show barcodes.tsv, features.tsv, and matrix.mtx
+data <- Read10X(data.dir = data_dir)
+```
+
+```{r}
+data_df <- as.data.frame(sparseToDenseMatrix(data))
+
+nrow(data_df)
+sum(rownames(data_df) == gene_map$ensembl_gene_id)
+
+data_df$hgnc_symbol <- gene_map$hgnc_symbol
+
+head(data_df[,2151:2152])
+
+rm(data)
+
+```
+
+```{r}
+# Summarize
+data_df_duplicates = data_df[rownames(data_df) %in% duplicates$ensembl_gene_id, ]
+
+data_sum <- data_df_duplicates %>% group_by(hgnc_symbol) %>% summarize_at(colnames(data_df_duplicates)[!colnames(data_df_duplicates) %in% c("hgnc_symbol")], sum)
+  
+rm(data_df_duplicates)
+head(data_sum)
+```
+
+```{r}
+# Join summarized dataset
+rownames(data_df) <- c()
+rownames(data_sum) <- c()
+
+# discard genes without symbols
+data_df <- data_df %>% filter(hgnc_symbol %in% gene_map_f$hgnc_symbol)
+
+# Remove duplicated genes
+data_df <- data_df[!data_df$hgnc_symbol %in% duplicates$hgnc_symbol,]
+
+# Add sum of duplicated genes
+rownames(data_df) <- c()
+data_df <- data_df %>% rbind(data_sum) %>% column_to_rownames("hgnc_symbol")
+
+data = as.matrix(data_df)
+
+rm(data_df, data_sum)
+
+data = as(data, "dgCMatrix")
+```
+
+```{r}
+Seurat_object = CreateSeuratObject(counts = data, project = "GiustacchiniEtAl2017")
+# rm(data)
+
+Seurat_object@meta.data <- Seurat_object@meta.data %>% rownames_to_column("Assay") %>% left_join(design, by="Assay") %>% column_to_rownames("Assay") %>% mutate(Sample = Sample.Characteristic.individual.)
+
+rm(design, ID_symbol_map)
+```
+
+# Inspecting dataset, QC plots
+```{r}
+# Check whether mitochondrial genes are present in the samples
+str_detect(rownames(Seurat_object), "^MT-") %>% sum()
+```
+```{r}
+# Compute the % of mitochondrial counts
+Seurat_object[["percent.mt"]] <- PercentageFeatureSet(Seurat_object, pattern = "^MT-") %>% mutate_all(~replace(., is.na(.), 0))
+```
+
+```{r}
+Idents(Seurat_object) <- ""
+
+# QC plots based on number of counts, features and % of mitochondrial genes
+VlnPlot(Seurat_object, features = c("nFeature_RNA"))
+VlnPlot(Seurat_object, features = c("nCount_RNA"))
+VlnPlot(Seurat_object, features = c("percent.mt"))
+
+FeatureScatter(Seurat_object, feature1 = "nCount_RNA", feature2 = "percent.mt")
+FeatureScatter(Seurat_object, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+Seurat_object@meta.data %>% select(nCount_RNA, nFeature_RNA, percent.mt) %>% summary()
+```
+
+# Filter datasets
+```{r}
+# Filter dataset based on # of features, counts and mitocondrial %
+Seurat_object_f <- subset(Seurat_object, subset = nFeature_RNA > 200 & nCount_RNA < 10000000 & percent.mt < 30)
+```
+
+```{r}
+# QC plots after filtering
+VlnPlot(Seurat_object_f, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+FeatureScatter(Seurat_object_f, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+FeatureScatter(Seurat_object_f, feature1 = "nCount_RNA", feature2 = "percent.mt")
+
+Seurat_object_f@meta.data %>% select(nCount_RNA, nFeature_RNA, percent.mt) %>% summary()
+
+Seurat_object_f
+```
+
+```{r}
+Seurat_object <- Seurat_object_f
+```
+# Edit metadata
+```{r}
+colnames(Seurat_object[[]])
+table(Seurat_object$orig.ident)
+table(Seurat_object$Sample.Characteristic.individual.)
+```
+
+```{r}
+Seurat_object@meta.data <- Seurat_object[[]] %>% rename("Sample.orig" = Sample) %>% mutate(Project = "GiustacchiniEtAl2017", Sample = Sample.Characteristic.individual.)
+```
+
+## Annotation for inferCNV
+```{r}
+annotation_metadata <- Seurat_object@meta.data %>% select(Sample.Characteristic.disease., Sample.Characteristic.clinical.information., Sample.Characteristic.individual.) %>% mutate(
+  annotation = ifelse(
+    Sample.Characteristic.disease. == "normal", 
+    "normal", 
+    ifelse(Sample.Characteristic.clinical.information. == "BCR-ABL positive",
+           paste0("BCR.ABL.pos_", Sample.Characteristic.individual.)
+           , paste0("BCR.ABL.neg_", Sample.Characteristic.individual.)))
+  )
+
+table(annotation_metadata$annotation)
+
+filter <- table(annotation_metadata$annotation) %>% as.data.frame() %>% filter(Freq > 29) %>% filter(str_detect(Var1, "pos") | Var1 %in% "normal")
+
+Seurat_object@meta.data$annotation <- annotation_metadata$annotation
+
+# Write annotations file
+Seurat_object@meta.data %>% filter(annotation %in% filter$Var1) %>% select(annotation) %>% rownames_to_column("sample_id") %>% write.table(file = "cellAnnotations.txt", sep = "\t", row.names = FALSE, col.names = FALSE)
+
+ref_group_names <- Seurat_object@meta.data %>% select(annotation) %>% unique() %>% filter(annotation == "normal")
+
+ref_group_names %>% write.csv2(file = "ref_group_names.csv", row.names = FALSE)
+```
+
+# Export
+```{r}
+saveRDS(Seurat_object, file = file.path(source.output.dir, "Seurat_object.rds"))
+
+# Seurat_object <- readRDS(file = file.path(source.output.dir, "Seurat_object.rds"))
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+# packageVersion("DESeq2")
+# packinfo <- installed.packages(fields = c("Package", "Version"))
+# packinfo[,c("Package", "Version")]
+# packinfo["graphics",c("Package", "Version")]
+
+```
+

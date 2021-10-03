@@ -1,0 +1,214 @@
+---
+title: "Tijhuis et al 202X scRNA-seq"
+author: "Pedro Batista Tan"
+date: "`r strftime(Sys.Date(), '%B %d %Y')`"
+output: 
+  html_document:
+    toc: true
+    number_sections: true
+---
+# Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = FALSE
+  # fig.width = 10, fig.height = 6, output: html_notebook
+)
+
+# install.packages("BiocManager") #(only if you do not have BiocManager)
+# BiocManager::install("DropletUtils", "org.Hs.eg.db")
+# install.packages("Seurat", "sparseMatrixStats", "tidyverse")
+library(Seurat)
+library(sparseMatrixStats)
+library(tidyverse)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(plotly)
+
+select = dplyr::select
+
+```
+
+# Loading data
+```{r}
+export = TRUE
+
+Seurat_object_name <- "scTijhuis"
+
+# generate output dir path named data
+source.output.dir <- file.path("output_sc")
+
+# if source output dir does not exist, create it
+if (!dir.exists(source.output.dir)) {
+    dir.create(source.output.dir)
+} else{
+  print("Output folder already exists")
+}
+
+```
+
+```{r}
+design <- read.csv("data/Complete_run_feature_ref.csv", header = TRUE)
+
+study_metadata = read.csv(file = "data/Complete_run_library.csv", header = TRUE)
+# features <- read.table("data/features.tsv")
+# barcodes <- read.table("data/barcodes.tsv")
+```
+
+```{r}
+data_dir <- "data/data_10x_format"
+list.files(data_dir) # Should show barcodes.tsv, genes.tsv, and matrix.mtx
+data <- Read10X(data.dir = data_dir)
+```
+
+```{r}
+# data$`Antibody Capture`
+dim(data$`Antibody Capture`)
+dim(data$`Gene Expression`)
+
+data$`Gene Expression`[1:5, 1:20]
+```
+
+```{r}
+# Create seurat object
+Seurat_object = CreateSeuratObject(counts = data$`Gene Expression`, project = "TijhuisEtAl202X")
+
+# Add HTO data as a separate assay, and demultiplex
+Seurat_object[["HTO"]] <- CreateAssayObject(counts = data$`Antibody Capture`)
+
+Seurat_metadata <- Seurat_object@meta.data
+
+Seurat_metadata %>% mutate_if(is.character, as.factor) %>% summary()
+```
+
+# Inspecting dataset, QC plots
+```{r}
+# Load ensembl gene database
+# Check whether mitochondrial genes are present in the samples
+rownames(Seurat_object)[str_detect(rownames(Seurat_object), "^mt-")]
+```
+
+```{r}
+# Compute the % of mitochondrial counts
+Seurat_object[["percent.mt"]] <- PercentageFeatureSet(Seurat_object, pattern = "^mt-") %>% mutate_all(~replace(., is.na(.), 0))
+
+```
+
+```{r}
+# QC plots based on number of counts, features and % of mitochondrial genes
+VlnPlot(Seurat_object, features = c("nFeature_RNA"))
+VlnPlot(Seurat_object, features = c("nCount_RNA"))
+VlnPlot(Seurat_object, features = c("percent.mt"))
+
+FeatureScatter(Seurat_object, feature1 = "nCount_RNA", feature2 = "percent.mt")
+FeatureScatter(Seurat_object, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+
+Seurat_object@meta.data %>% select(nCount_RNA, nFeature_RNA, percent.mt) %>% summary()
+```
+
+# Filter datasets
+```{r}
+# Filter dataset based on # of features, counts and mitocondrial %
+Seurat_object_f <- subset(Seurat_object, subset = nFeature_RNA > 200 & nCount_RNA > 1000 & percent.mt < 20)
+```
+
+```{r}
+# QC plots after filtering
+# VlnPlot(Seurat_object_f, features = c("percent.mt"))
+
+VlnPlot(Seurat_object_f, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+FeatureScatter(Seurat_object_f, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+FeatureScatter(Seurat_object_f, feature1 = "nCount_RNA", feature2 = "percent.mt")
+
+Seurat_object_f@meta.data %>% select(nCount_RNA, nFeature_RNA, percent.mt) %>% summary()
+
+```
+
+```{r}
+Seurat_object <- Seurat_object_f
+
+rm(mitochondrial_genes, ensembl_db, Seurat_object_f, data)
+```
+
+# HTO Demultiplexing
+```{r}
+# Normalize HTO data
+Seurat_object <- NormalizeData(Seurat_object, assay = "HTO", normalization.method = "CLR")
+
+# Demultiplex HTO hashing
+Seurat_object <- HTODemux(Seurat_object, assay = "HTO", positive.quantile = 0.99)
+
+Seurat_object@meta.data %>% mutate_if(is.character, as.factor) %>% summary()
+
+```
+
+```{r}
+table(Seurat_object$HTO_classification.global)
+
+Idents(Seurat_object) <- "HTO_maxID"
+
+RidgePlot(Seurat_object, assay = "HTO", features = rownames(Seurat_object[["HTO"]])[1], ncol = 1)
+RidgePlot(Seurat_object, assay = "HTO", features = rownames(Seurat_object[["HTO"]])[2], ncol = 1)
+RidgePlot(Seurat_object, assay = "HTO", features = rownames(Seurat_object[["HTO"]])[3], ncol = 1)
+
+rownames(Seurat_object@assays$HTO)
+
+FeatureScatter(Seurat_object, feature1 = "eT-TotalSeqB", feature2 = "T811-TotalSeqB")
+
+FeatureScatter(Seurat_object, feature1 = "eT-TotalSeqB", feature2 = "T812-TotalSeqB")
+
+FeatureScatter(Seurat_object, feature1 = "T811-TotalSeqB", feature2 = "T812-TotalSeqB")
+
+```
+
+```{r}
+# Filter dataset based on HTO sample assignment
+Seurat_object <- subset(Seurat_object, subset = HTO_classification.global == "Singlet")
+```
+
+
+# Edit metadata
+```{r}
+colnames(Seurat_object[[]])
+table(Seurat_object$orig.ident)
+table(Seurat_object$HTO_classification)
+table(Seurat_object$HTO_classification.global)
+table(Seurat_object$hash.ID)
+```
+
+# Annotation for inferCNV
+```{r}
+labels <- Seurat_object@meta.data %>% select(HTO_classification) %>% unique()
+labels$annotation <- c("T812", "T811", "eT")
+rownames(labels) <- c()
+
+annot_scRNA <- Seurat_object@meta.data %>% rownames_to_column("ID") %>% select(ID, HTO_classification) %>% left_join(labels, by = "HTO_classification") %>% column_to_rownames("ID")
+
+Seurat_object@meta.data$annotation <- annot_scRNA$annotation
+
+table(annot_scRNA$annotation)
+
+# Write annotations file
+Seurat_object@meta.data %>% select(annotation) %>% rownames_to_column("sample_id") %>% write.table(file = "cellAnnotations.txt", sep = "\t", row.names = FALSE, col.names = FALSE)
+
+ref_group_names <- Seurat_object@meta.data %>% select(annotation) %>% unique() %>% filter(!str_detect(annotation, "T81"))
+
+ref_group_names %>% write.csv2(file = "ref_group_names.csv", row.names = FALSE)
+```
+
+# Export
+```{r}
+if(export){
+saveRDS(Seurat_object, file = paste0(source.output.dir, "/Seurat_object.rds"))
+}
+```
+
+# sessionInfo - Package Versions
+```{r}
+sessionInfo()
+# packageVersion("DESeq2")
+# packinfo <- installed.packages(fields = c("Package", "Version"))
+# packinfo[,c("Package", "Version")]
+# packinfo["graphics",c("Package", "Version")]
+
+```
+

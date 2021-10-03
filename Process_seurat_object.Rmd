@@ -9,11 +9,12 @@ output:
 params:
   folder: ""
   export: TRUE
+  species: "hsapiens"
 ---
 # Loading Packages
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(
-  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = FALSE
+  echo = TRUE, warning=FALSE, message = FALSE, dpi = 300, error = TRUE
   # fig.width = 10, fig.height = 6, output: html_notebook
 )
 
@@ -26,6 +27,7 @@ library(tidyverse)
 library(AnnotationDbi)
 library(org.Hs.eg.db)
 library(plotly)
+library(biomaRt)
 
 source("Helper_functions.R")
 
@@ -41,13 +43,13 @@ print(getwd())
 ```
 
 # Setup
-```{r}
+```{r Setup}
 export = params$export
 folder = params$folder
 print(folder)
 
 # generate output dir path named data
-source.output.dir <- file.path(paste0(folder, "/output_sc"))
+source.output.dir <- file.path(file.path(folder, "output_sc"))
 
 # if source output dir does not exist, create it
 if (!dir.exists(source.output.dir)) {
@@ -60,7 +62,7 @@ if (!dir.exists(source.output.dir)) {
 
 Loading data
 ```{r Loading data}
-Seurat_object <- readRDS(file = paste0(source.output.dir, "/Seurat_object.rds"))
+Seurat_object <- readRDS(file = file.path(source.output.dir, "Seurat_object.rds"))
 
 Seurat_object[[]]$Project %>% unique()
 ```
@@ -124,6 +126,20 @@ rm(mat, pca, cumvar)
 # A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can segregate this list into markers of G2/M phase and markers of S phase
 s.genes <- cc.genes$s.genes
 g2m.genes <- cc.genes$g2m.genes
+
+if (params$species == "mmusculus"){
+  # Convert the list to mouse equivalent genes instead
+human = biomaRt::useMart(biomart = "ensembl",  dataset = "hsapiens_gene_ensembl")
+mouse = biomaRt::useMart(biomart = "ensembl", dataset = "mmusculus_gene_ensembl")
+
+s.genes = getLDS(attributes = c("hgnc_symbol"), filters = "hgnc_symbol", values = s.genes , mart = human, attributesL = c("mgi_symbol"), martL = mouse, uniqueRows=T)
+s.genes <- unique(s.genes[, 2])
+s.genes
+
+g2m.genes = getLDS(attributes = c("hgnc_symbol"), filters = "hgnc_symbol", values = g2m.genes , mart = human, attributesL = c("mgi_symbol"), martL = mouse, uniqueRows=T)
+g2m.genes <- unique(g2m.genes[, 2])
+g2m.genes
+}
 
 # Assign and inspect cell cycle scores
 Seurat_object_n <- CellCycleScoring(Seurat_object_n, s.features = s.genes, g2m.features = g2m.genes)
@@ -217,10 +233,10 @@ rm(p)
 # Export
 ```{r Export}
 if(export){
-saveRDS(Seurat_object_n, file = paste0(source.output.dir, "/Seurat_object_n.rds"))
+saveRDS(Seurat_object_n, file = file.path(source.output.dir, "Seurat_object_n.rds"))
 }
 
-# Seurat_object_n <- readRDS(file = paste0(source.output.dir, "/Seurat_object_n.rds"))
+# Seurat_object_n <- readRDS(file = file.path(source.output.dir, "Seurat_object_n.rds"))
 ```
 
 # sessionInfo - Package Versions
